@@ -19,7 +19,8 @@ class SearchThread(QThread):
         self.excluded_files = []  # 除外したファイル名を保持する属性
 
     def run(self):
-        self.search_files(self.search_string, os.path.dirname(os.path.abspath(__file__)))
+        exe_directory = os.path.dirname(sys.executable)
+        self.search_files(self.search_string, exe_directory)
         self.search_completed.emit(self.files_searched, self.files_excluded, self.excluded_files)  # 検索したファイル数、除外したファイル数、除外したファイル名を渡す
 
     def search_files(self, search_string, directory):
