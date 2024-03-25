@@ -23,7 +23,7 @@ class SearchThread(QThread):
         self.search_completed.emit(self.files_searched, self.files_excluded, self.excluded_files)  # 検索したファイル数、除外したファイル数、除外したファイル名を渡す
 
     def search_files(self, search_string, directory):
-        extensions = [".docx", ".txt"]
+        extensions = [".doc", ".docx", ".txt"]
 
         # 検索文字列を解析
         and_parts = re.split(r'\s*&&\s*', search_string)
@@ -39,7 +39,7 @@ class SearchThread(QThread):
                 if file.endswith(tuple(extensions)):
                     file_path = os.path.join(root, file)
                     try:
-                        if file.endswith(".docx"):
+                        if file.endswith((".doc", ".docx")):
                             if file.startswith("~$"):  # 開いているファイルを除外
                                 self.files_excluded += 1
                                 self.excluded_files.append(file_path)
