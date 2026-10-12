@@ -1,0 +1,15 @@
+# 開発ツールの設定のみ。アプリは `python main.py` で起動する(パッケージとしては配布しない)。
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+    "RUF001", # 日本語の全角文字を紛らわしい文字として扱わない
+    "RUF002",
+    "RUF003",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
