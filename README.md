@@ -3,11 +3,11 @@ A simple file search GUI application created with the help of Claude.
 
 # ファイル検索アプリ
 
-このアプリケーションは、指定した検索文字列を含む文書（.docx、.txt）をローカルフォルダー内で検索し、結果を表示するデスクトップアプリケーションです。
+このアプリケーションは、指定した検索文字列を含む文書（.docx、.txt、.md、.csv、.pdf）をローカルフォルダー内で検索し、結果を表示するデスクトップアプリケーションです。
 
 ## 特徴
 
-- `.docx`および`.txt`ファイルのサポート（拡張子の大文字・小文字は区別しません。`.docx`は本文と表の中を検索します）
+- `.docx`、`.txt`、`.md`、`.markdown`、`.csv`、`.pdf` のサポート（拡張子の大文字・小文字は区別しません。`.docx`は本文・表・ヘッダー・フッター・テキストボックスの中を検索します）
 - AND検索 (`&&`)、OR検索 (`||` または空白)、フレーズ検索（引用符で囲まれた文字列）
 - 検索先フォルダーの指定（サブフォルダーも検索します）
 - 検索進捗の表示と、検索のキャンセル
@@ -71,7 +71,8 @@ python main.py "C:\Users\me\Documents"
 
 - 壊れている、またはパスワードで保護されているなど、Word文書として開けない `.docx`
 - Wordが編集中に作成する一時ファイル（`~$` で始まる `.docx`）
-- 文字コードを判定できない `.txt`
+- 文字コードを判定できない `.txt` / `.md` / `.csv`
+- 暗号化されている、壊れている、または画像のみでテキストを取り出せない `.pdf`
 - 100MBを超えるファイル
 - アクセス権がなく読み取れないファイル・フォルダー
 
@@ -89,7 +90,7 @@ python main.py "C:\Users\me\Documents"
 | --- | --- |
 | `main.py` | 起動スクリプト |
 | `quickfilelocator/query.py` | 検索文字列の解析と本文との照合 |
-| `quickfilelocator/readers.py` | `.txt` / `.docx` から本文を取り出す処理 |
+| `quickfilelocator/readers.py` | `.txt` / `.md` / `.csv` / `.docx` / `.pdf` から本文を取り出す処理 |
 | `quickfilelocator/search.py` | フォルダーの走査と検索（Qtに依存しません） |
 | `quickfilelocator/gui.py` | 画面と、検索を実行するスレッド |
 | `quickfilelocator/app.py` | 起動時の組み立て |
