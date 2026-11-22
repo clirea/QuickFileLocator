@@ -2,9 +2,10 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication
 
 from main import (
+    MAX_SEARCH_FILE_BYTES,
     MainWindow,
     SearchDirectoryError,
     SearchThread,
@@ -88,6 +89,16 @@ def test正常系___init__メソッドがexcluded_filesを空リストにする�
     assert search_thread.excluded_files == []
 
 
+def test正常系__exclude_fileメソッドが除外件数を1増やすこと(search_thread):
+    search_thread._exclude_file(r"C:\docs\bad.txt")
+    assert search_thread.files_excluded == 1
+
+
+def test正常系__exclude_fileメソッドがパスをexcluded_filesへ入れること(search_thread):
+    search_thread._exclude_file(r"C:\docs\bad.txt")
+    assert search_thread.excluded_files == [r"C:\docs\bad.txt"]
+
+
 def test正常系_runメソッドがsearch_filesを指定ディレクトリで呼ぶこと(search_thread):
     search_thread.search_files = MagicMock()
     search_thread.search_completed = MagicMock()
@@ -166,6 +177,43 @@ def test正常系_search_filesメソッドが一致するdocxをresult_foundで�
 def test正常系_search_filesメソッドが開いているdocxを除外すること(mock_walk, search_thread):
     excluded_path = os.path.join(r"C:\docs", "~$open.docx")
     mock_walk.return_value = [(r"C:\docs", [], ["~$open.docx"])]
+    search_thread.search_files("needle", r"C:\docs")
+    assert search_thread.excluded_files == [excluded_path]
+
+
+@patch("main.chardet.detect", return_value={"encoding": None})
+@patch("main.os.walk")
+def test異常系_search_filesメソッドがencodingがNoneのとき除外すること(
+    mock_walk, mock_detect, search_thread
+):
+    excluded_path = os.path.join(r"C:\docs", "unknown.txt")
+    mock_walk.return_value = [(r"C:\docs", [], ["unknown.txt"])]
+    mocked_file = MagicMock()
+    mocked_file.read.return_value = b"\xff\xfe"
+    mocked_file.__enter__.return_value = mocked_file
+    with patch("builtins.open", return_value=mocked_file):
+        search_thread.search_files("needle", r"C:\docs")
+    assert search_thread.excluded_files == [excluded_path]
+
+
+@patch("main.os.path.getsize", return_value=MAX_SEARCH_FILE_BYTES + 1)
+@patch("main.os.walk")
+def test異常系_search_filesメソッドが過大ファイルを除外すること(
+    mock_walk, mock_getsize, search_thread
+):
+    excluded_path = os.path.join(r"C:\docs", "huge.txt")
+    mock_walk.return_value = [(r"C:\docs", [], ["huge.txt"])]
+    search_thread.search_files("needle", r"C:\docs")
+    assert search_thread.excluded_files == [excluded_path]
+
+
+@patch("main.docx.Document", side_effect=RuntimeError("broken"))
+@patch("main.os.walk")
+def test異常系_search_filesメソッドが予期しない例外で除外すること(
+    mock_walk, mock_document, search_thread
+):
+    excluded_path = os.path.join(r"C:\docs", "boom.docx")
+    mock_walk.return_value = [(r"C:\docs", [], ["boom.docx"])]
     search_thread.search_files("needle", r"C:\docs")
     assert search_thread.excluded_files == [excluded_path]
 
