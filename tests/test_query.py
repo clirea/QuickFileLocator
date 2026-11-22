@@ -105,3 +105,44 @@ def test正常系_find_matchesメソッドが条件を満たさない本文で�
 
 def test正常系_unique_termsメソッドが重複する語を1つにすること():
     assert SearchQuery.parse("foo || foo && bar").unique_terms() == ("foo", "bar")
+
+
+def test正常系_matchesメソッドが正規表現の繰り返しに一致すること():
+    assert SearchQuery.parse("fo+", regex=True).matches("foo") is True
+
+
+def test正常系_matchesメソッドが正規表現に合わない本文を拒否すること():
+    assert SearchQuery.parse("fo+", regex=True).matches("fx") is False
+
+
+def test正常系_matchesメソッドが正規表現でもANDの両方を要求すること():
+    assert SearchQuery.parse("fo+ && ba+", regex=True).matches("foo") is False
+
+
+def test正常系_matchesメソッドが引用符付きの正規表現文字を文字列として扱うこと():
+    assert SearchQuery.parse('"fo+"', regex=True).matches("foo") is False
+
+
+def test異常系_parseメソッドが不正な正規表現でQuerySyntaxErrorを送出すること():
+    with pytest.raises(QuerySyntaxError, match="正規表現が不正です"):
+        SearchQuery.parse("(", regex=True)
+
+
+def test正常系_matchesメソッドが正規表現で大文字小文字を無視すること():
+    assert SearchQuery.parse("fo+", case_sensitive=False, regex=True).matches("FOO") is True
+
+
+def test正常系_find_matchesメソッドが正規表現の一致範囲を返すこと():
+    assert SearchQuery.parse("fo+", regex=True).find_matches("x foo y") == ((2, 5),)
+
+
+def test正常系_find_matchesメソッドが正規表現オフのときメタ文字を文字列として扱うこと():
+    assert SearchQuery.parse("fo+", regex=False).find_matches("foo") == ()
+
+
+def test正常系_parseメソッドが正規表現指定を保持すること():
+    assert SearchQuery.parse("foo", regex=True).regex is True
+
+
+def test正常系_parseメソッドが既定で正規表現を使わないこと():
+    assert SearchQuery.parse("foo").regex is False
