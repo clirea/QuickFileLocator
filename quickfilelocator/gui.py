@@ -41,6 +41,10 @@ from quickfilelocator.query import QuerySyntaxError, SearchQuery
 from quickfilelocator.readers import UnreadableFileError
 from quickfilelocator.search import FileSearcher, SearchDirectoryError, SearchSummary
 
+HIT_BACKGROUND = QColor("#fff59d")
+CURRENT_HIT_BACKGROUND = QColor("#ffcc80")
+PATH_ROLE = Qt.ItemDataRole.UserRole
+
 
 def open_with_default_app(path: str) -> bool:
     """OSで関連付けられたアプリでファイルを開く。"""
@@ -49,7 +53,7 @@ def open_with_default_app(path: str) -> bool:
 
 class SearchThread(QThread):
     progress_update = pyqtSignal(int, int)  # 処理済み件数、対象件数
-    result_found = pyqtSignal(str)
+    result_found = pyqtSignal(str, int)  # パス、ファイル内ヒット件数
     search_completed = pyqtSignal(object)  # SearchSummary
     search_failed = pyqtSignal(str)
 
@@ -66,7 +70,7 @@ class SearchThread(QThread):
             summary = self._searcher.search(
                 self._query,
                 self._directory,
-                on_match=lambda path: self.result_found.emit(str(path)),
+                on_match=lambda path, hit_count: self.result_found.emit(str(path), hit_count),
                 on_progress=self._report_progress,
                 is_cancelled=self.isInterruptionRequested,
             )
@@ -99,6 +103,8 @@ class MainWindow(QMainWindow):
         self._open_path = open_path
         self._close_requested = False
         self._active_query: SearchQuery | None = None
+        self._hit_cursors: list[QTextCursor] = []
+        self._hit_index = 0
         self.search_thread: SearchThread | None = None
 
         self.setWindowTitle("ファイル検索")
@@ -157,12 +163,27 @@ class MainWindow(QMainWindow):
         preview_pane = QWidget(self)
         preview_layout = QVBoxLayout(preview_pane)
         preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_header = QHBoxLayout()
         self.preview_label = QLabel("プレビュー", self)
+        self.previous_hit_button = QPushButton("前へ", self)
+        self.next_hit_button = QPushButton("次へ", self)
+        self.previous_hit_button.setEnabled(False)
+        self.next_hit_button.setEnabled(False)
+        self.previous_hit_button.clicked.connect(self.previous_hit)
+        self.next_hit_button.clicked.connect(self.next_hit)
+        preview_header.addWidget(self.preview_label)
+        preview_header.addStretch(1)
+        preview_header.addWidget(self.previous_hit_button)
+        preview_header.addWidget(self.next_hit_button)
         self.preview_area = QTextEdit(self)
         self.preview_area.setReadOnly(True)
         self.preview_area.setPlaceholderText("検索結果を選ぶと内容を表示します")
-        preview_layout.addWidget(self.preview_label)
+        preview_layout.addLayout(preview_header)
         preview_layout.addWidget(self.preview_area)
+        next_hit_shortcut = QShortcut(QKeySequence("F3"), self)
+        next_hit_shortcut.activated.connect(self.next_hit)
+        previous_hit_shortcut = QShortcut(QKeySequence("Shift+F3"), self)
+        previous_hit_shortcut.activated.connect(self.previous_hit)
 
         self.results_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.results_splitter.addWidget(results_pane)
@@ -238,8 +259,10 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(processed_count)
         self.status_bar.showMessage(f"検索中: {processed_count} / {total_count} 件")
 
-    def display_result(self, result: str) -> None:
-        self.result_list.addItem(result)
+    def display_result(self, result: str, hit_count: int = 1) -> None:
+        item = QListWidgetItem(f"{result}  ({hit_count}件)")
+        item.setData(PATH_ROLE, result)
+        self.result_list.addItem(item)
         if self.result_list.currentItem() is None:
             self.result_list.setCurrentRow(0)
 
@@ -251,17 +274,35 @@ class MainWindow(QMainWindow):
         if current is None:
             self._clear_preview()
             return
-        path = Path(current.text())
+        path = Path(self._item_path(current))
         try:
             content = self._searcher.read(path)
         except (UnreadableFileError, OSError) as error:
-            self.preview_area.setExtraSelections([])
+            self._clear_preview()
             self.preview_area.setPlainText(f"プレビューできません: {error}")
             return
         self.preview_area.setPlainText(content)
         query = self._query_for_preview()
         if query is not None:
             self._highlight_query(query)
+        else:
+            self._set_hits([])
+
+    def next_hit(self) -> None:
+        if len(self._hit_cursors) < 2:
+            return
+        self._hit_index = (self._hit_index + 1) % len(self._hit_cursors)
+        self._reveal_current_hit()
+
+    def previous_hit(self) -> None:
+        if len(self._hit_cursors) < 2:
+            return
+        self._hit_index = (self._hit_index - 1) % len(self._hit_cursors)
+        self._reveal_current_hit()
+
+    def _item_path(self, item: QListWidgetItem) -> str:
+        stored = item.data(PATH_ROLE)
+        return stored if stored else item.text()
 
     def _query_for_preview(self) -> SearchQuery | None:
         if self._active_query is not None:
@@ -272,35 +313,64 @@ class MainWindow(QMainWindow):
             return None
 
     def _highlight_query(self, query: SearchQuery) -> None:
-        extra: list[QTextEdit.ExtraSelection] = []
-        fmt = QTextCharFormat()
-        fmt.setBackground(QColor("#fff59d"))
         flags = QTextDocument.FindFlag.FindCaseSensitively if query.case_sensitive else QTextDocument.FindFlag(0)
-        first: QTextCursor | None = None
         document = self.preview_area.document()
-        for term in (term for group in query.groups for term in group):
-            if not term:
-                continue
+        cursors: list[QTextCursor] = []
+        seen: set[tuple[int, int]] = set()
+        for term in query.unique_terms():
             cursor = QTextCursor(document)
             while True:
                 found = document.find(term, cursor, flags)
                 if found.isNull():
                     break
-                selection = QTextEdit.ExtraSelection()
-                selection.cursor = QTextCursor(found)
-                selection.format = fmt
-                extra.append(selection)
-                if first is None:
-                    first = QTextCursor(found)
+                span = (found.selectionStart(), found.selectionEnd())
+                if span not in seen:
+                    seen.add(span)
+                    cursors.append(QTextCursor(found))
                 cursor = found
-        self.preview_area.setExtraSelections(extra)
-        if first is not None:
-            self.preview_area.setTextCursor(first)
-            self.preview_area.ensureCursorVisible()
+        cursors.sort(key=lambda item: item.selectionStart())
+        self._set_hits(cursors)
+
+    def _set_hits(self, cursors: list[QTextCursor]) -> None:
+        self._hit_cursors = cursors
+        self._hit_index = 0
+        if cursors:
+            self._reveal_current_hit()
+            return
+        self.preview_area.setExtraSelections([])
+        self.preview_label.setText("プレビュー")
+        self.next_hit_button.setEnabled(False)
+        self.previous_hit_button.setEnabled(False)
+
+    def _reveal_current_hit(self) -> None:
+        other_format = QTextCharFormat()
+        other_format.setBackground(HIT_BACKGROUND)
+        current_format = QTextCharFormat()
+        current_format.setBackground(CURRENT_HIT_BACKGROUND)
+        extras: list[QTextEdit.ExtraSelection] = []
+        for index, cursor in enumerate(self._hit_cursors):
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = QTextCursor(cursor)
+            selection.format = current_format if index == self._hit_index else other_format
+            extras.append(selection)
+        self.preview_area.setExtraSelections(extras)
+        current = QTextCursor(self._hit_cursors[self._hit_index])
+        self.preview_area.setTextCursor(current)
+        self.preview_area.ensureCursorVisible()
+        total = len(self._hit_cursors)
+        self.preview_label.setText(f"プレビュー  {self._hit_index + 1} / {total}")
+        movable = total > 1
+        self.next_hit_button.setEnabled(movable)
+        self.previous_hit_button.setEnabled(movable)
 
     def _clear_preview(self) -> None:
+        self._hit_cursors = []
+        self._hit_index = 0
         self.preview_area.setExtraSelections([])
         self.preview_area.clear()
+        self.preview_label.setText("プレビュー")
+        self.next_hit_button.setEnabled(False)
+        self.previous_hit_button.setEnabled(False)
 
     def search_completed(self, summary: SearchSummary) -> None:
         prefix = "検索をキャンセルしました。" if summary.cancelled else "検索完了。"
@@ -327,11 +397,12 @@ class MainWindow(QMainWindow):
             self.close()
 
     def open_result(self, item: QListWidgetItem) -> None:
-        if not self._open_path(item.text()):
-            self.status_bar.showMessage(f"ファイルを開けませんでした: {item.text()}")
+        path = self._item_path(item)
+        if not self._open_path(path):
+            self.status_bar.showMessage(f"ファイルを開けませんでした: {path}")
 
     def copy_selected_results(self) -> None:
-        paths = [item.text() for item in self.result_list.selectedItems()]
+        paths = [self._item_path(item) for item in self.result_list.selectedItems()]
         if paths:
             QApplication.clipboard().setText("\n".join(paths))
 

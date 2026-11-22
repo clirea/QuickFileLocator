@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 AND_OPERATOR = "&&"
@@ -81,3 +82,27 @@ class SearchQuery:
         """本文がこの検索条件を満たすかを返す。"""
         haystack = content if self.case_sensitive else content.casefold()
         return all(any(term in haystack for term in group) for group in self.groups)
+
+    def unique_terms(self) -> tuple[str, ...]:
+        """検索式に現れる語を、重複なしで出現順に返す。"""
+        seen: list[str] = []
+        for group in self.groups:
+            for term in group:
+                if term and term not in seen:
+                    seen.append(term)
+        return tuple(seen)
+
+    def find_matches(self, content: str) -> tuple[tuple[int, int], ...]:
+        """条件を満たす本文について、検索語の出現範囲 (start, end) を開始位置順で返す。"""
+        if not self.matches(content):
+            return ()
+        flags = 0 if self.case_sensitive else re.IGNORECASE
+        spans: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for term in self.unique_terms():
+            for match in re.finditer(re.escape(term), content, flags):
+                span = (match.start(), match.end())
+                if span not in seen:
+                    seen.add(span)
+                    spans.append(span)
+        return tuple(sorted(spans))

@@ -53,13 +53,13 @@ class FileSearcher:
         query: SearchQuery,
         directory: Path,
         *,
-        on_match: Callable[[Path], None],
+        on_match: Callable[[Path, int], None],
         on_progress: Callable[[int, int], None],
         is_cancelled: Callable[[], bool] = lambda: False,
     ) -> SearchSummary:
         """directory 配下を検索する。
 
-        一致するたびに on_match(パス)、1ファイル処理するたびに
+        一致するたびに on_match(パス, ヒット件数)、1ファイル処理するたびに
         on_progress(処理済み件数, 対象件数) を呼ぶ。is_cancelled が真を返すと、
         そこまでの結果を cancelled=True で返す。
         """
@@ -84,9 +84,10 @@ class FileSearcher:
                     excluded.append(ExcludedFile(path, self._describe(error)))
                 else:
                     searched_count += 1
-                    if query.matches(content):
+                    hits = query.find_matches(content)
+                    if hits:
                         matched_count += 1
-                        on_match(path)
+                        on_match(path, len(hits))
                 on_progress(processed_count, len(targets))
 
         return SearchSummary(

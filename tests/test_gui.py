@@ -53,13 +53,13 @@ def test正常系_runメソッドが検索結果を完了シグナルで通知�
     assert completed == [(searcher.search.return_value,)]
 
 
-def test正常系_runメソッドが一致したパスを文字列で通知すること(thread, searcher):
-    searcher.search.side_effect = lambda *args, on_match, **kwargs: on_match(Path("/data/a.txt"))
+def test正常系_runメソッドが一致したパスとヒット件数を通知すること(thread, searcher):
+    searcher.search.side_effect = lambda *args, on_match, **kwargs: on_match(Path("/data/a.txt"), 3)
     found = collect(thread.result_found)
 
     thread.run()
 
-    assert found == [(str(Path("/data/a.txt")),)]
+    assert found == [(str(Path("/data/a.txt")), 3)]
 
 
 def test正常系_runメソッドが中断要求の有無をキャンセル判定として渡すこと(thread, searcher):
@@ -335,7 +335,13 @@ def test正常系_update_progressメソッドが対象0件でも進捗バーを�
 def test正常系_display_resultメソッドが結果を一覧に追加すること(window):
     window.display_result("/data/a.txt")
 
-    assert window.result_list.item(0).text() == "/data/a.txt"
+    assert window.result_list.item(0).text() == "/data/a.txt  (1件)"
+
+
+def test正常系_display_resultメソッドがファイル内のヒット件数を表示すること(window):
+    window.display_result("/data/a.txt", 3)
+
+    assert window.result_list.item(0).text() == "/data/a.txt  (3件)"
 
 
 def test正常系_display_resultメソッドが最初の結果の本文をプレビューすること(window, searcher):
@@ -362,9 +368,60 @@ def test正常系_preview_current_resultメソッドが選択したファイル�
 
 def test正常系_preview_current_resultメソッドが検索語を強調すること(window, searcher):
     searcher.read.return_value = "needle here needle"
-    window.display_result("/data/a.txt")
+    window.display_result("/data/a.txt", 2)
 
     assert len(window.preview_area.extraSelections()) == 2
+
+
+def test正常系_preview_current_resultメソッドがヒット位置をラベルに出すこと(window, searcher):
+    searcher.read.return_value = "needle here needle"
+    window.display_result("/data/a.txt", 2)
+
+    assert window.preview_label.text() == "プレビュー  1 / 2"
+
+
+def test正常系_next_hitメソッドが次のヒットへ進むこと(window, searcher):
+    searcher.read.return_value = "needle here needle"
+    window.display_result("/data/a.txt", 2)
+
+    window.next_hit()
+
+    assert window.preview_label.text() == "プレビュー  2 / 2"
+
+
+def test正常系_next_hitメソッドが末尾の次で先頭へ戻ること(window, searcher):
+    searcher.read.return_value = "needle here needle"
+    window.display_result("/data/a.txt", 2)
+    window.next_hit()
+
+    window.next_hit()
+
+    assert window.preview_label.text() == "プレビュー  1 / 2"
+
+
+def test正常系_previous_hitメソッドが前のヒットへ戻ること(window, searcher):
+    searcher.read.return_value = "needle here needle"
+    window.display_result("/data/a.txt", 2)
+    window.next_hit()
+
+    window.previous_hit()
+
+    assert window.preview_label.text() == "プレビュー  1 / 2"
+
+
+def test正常系_next_hitメソッドが複数ヒットのときボタンを有効にすること(window, searcher):
+    searcher.read.return_value = "needle here needle"
+    window.display_result("/data/a.txt", 2)
+
+    assert window.next_hit_button.isEnabled() is True
+
+
+def test正常系_next_hitメソッドが1件だけのとき進まないこと(window, searcher):
+    searcher.read.return_value = "needle"
+    window.display_result("/data/a.txt", 1)
+    window.next_hit()
+
+    assert window.preview_label.text() == "プレビュー  1 / 1"
 
 
 def test異常系_preview_current_resultメソッドが読めないファイルの理由を出すこと(window, searcher):
@@ -564,7 +621,7 @@ def test正常系_start_searchメソッドが実スレッドの検索結果を�
     wait_until_idle(real_window)
 
     assert [real_window.result_list.item(i).text() for i in range(real_window.result_list.count())] == [
-        str(tmp_path / "hit.txt")
+        f"{tmp_path / 'hit.txt'}  (1件)"
     ]
 
 
