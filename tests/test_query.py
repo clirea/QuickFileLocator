@@ -85,3 +85,23 @@ def test正常系_matchesメソッドが検索条件どおりに本文を判定�
 )
 def test正常系_matchesメソッドが区別しない指定のとき大文字小文字を無視して判定すること(text, content, expected):
     assert SearchQuery.parse(text, case_sensitive=False).matches(content) is expected
+
+
+def test正常系_find_matchesメソッドが複数箇所の件数を返すこと():
+    assert len(SearchQuery.parse("ab").find_matches("ab x ab")) == 2
+
+
+def test正常系_find_matchesメソッドが1件目の開始位置を返すこと():
+    assert SearchQuery.parse("ab").find_matches("ab x ab")[0] == (0, 2)
+
+
+def test正常系_find_matchesメソッドが2件目の開始位置を返すこと():
+    assert SearchQuery.parse("ab").find_matches("ab x ab")[1] == (5, 7)
+
+
+def test正常系_find_matchesメソッドが条件を満たさない本文では空を返すこと():
+    assert SearchQuery.parse("foo && bar").find_matches("foo only") == ()
+
+
+def test正常系_unique_termsメソッドが重複する語を1つにすること():
+    assert SearchQuery.parse("foo || foo && bar").unique_terms() == ("foo", "bar")
