@@ -5,8 +5,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, QUrl, pyqtSignal
-from PyQt6.QtGui import QCloseEvent, QDesktopServices, QKeySequence, QShortcut
+from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt6.QtGui import (
+    QCloseEvent,
+    QColor,
+    QDesktopServices,
+    QKeySequence,
+    QShortcut,
+    QTextCharFormat,
+    QTextCursor,
+    QTextDocument,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -21,12 +30,15 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QStatusBar,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from quickfilelocator.query import QuerySyntaxError, SearchQuery
+from quickfilelocator.readers import UnreadableFileError
 from quickfilelocator.search import FileSearcher, SearchDirectoryError, SearchSummary
 
 
@@ -86,10 +98,11 @@ class MainWindow(QMainWindow):
         self._thread_factory = thread_factory
         self._open_path = open_path
         self._close_requested = False
+        self._active_query: SearchQuery | None = None
         self.search_thread: SearchThread | None = None
 
         self.setWindowTitle("ファイル検索")
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(100, 100, 1100, 700)
 
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
@@ -128,11 +141,36 @@ class MainWindow(QMainWindow):
 
         self.result_list = QListWidget(self)
         self.result_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.result_list.setToolTip("ダブルクリックでファイルを開きます。選択してコピーもできます。")
+        self.result_list.setToolTip(
+            "クリックでプレビュー、ダブルクリックでファイルを開きます。選択してコピーもできます。"
+        )
         self.result_list.itemActivated.connect(self.open_result)
-        layout.addWidget(self.result_list, 3)
+        self.result_list.currentItemChanged.connect(self.preview_current_result)
         copy_shortcut = QShortcut(QKeySequence.StandardKey.Copy, self.result_list)
         copy_shortcut.activated.connect(self.copy_selected_results)
+
+        results_pane = QWidget(self)
+        results_layout = QVBoxLayout(results_pane)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.addWidget(self.result_list)
+
+        preview_pane = QWidget(self)
+        preview_layout = QVBoxLayout(preview_pane)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        self.preview_label = QLabel("プレビュー", self)
+        self.preview_area = QTextEdit(self)
+        self.preview_area.setReadOnly(True)
+        self.preview_area.setPlaceholderText("検索結果を選ぶと内容を表示します")
+        preview_layout.addWidget(self.preview_label)
+        preview_layout.addWidget(self.preview_area)
+
+        self.results_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.results_splitter.addWidget(results_pane)
+        self.results_splitter.addWidget(preview_pane)
+        self.results_splitter.setStretchFactor(0, 1)
+        self.results_splitter.setStretchFactor(1, 1)
+        self.results_splitter.setSizes([520, 520])
+        layout.addWidget(self.results_splitter, 3)
 
         self.excluded_label = QLabel("除外されたファイル:", self)
         self.excluded_label.setVisible(False)
@@ -169,7 +207,9 @@ class MainWindow(QMainWindow):
             return
 
         self._set_searching(True)
+        self._active_query = query
         self.result_list.clear()
+        self._clear_preview()
         self.excluded_area.clear()
         self.excluded_label.setVisible(False)
         self.excluded_area.setVisible(False)
@@ -200,6 +240,67 @@ class MainWindow(QMainWindow):
 
     def display_result(self, result: str) -> None:
         self.result_list.addItem(result)
+        if self.result_list.currentItem() is None:
+            self.result_list.setCurrentRow(0)
+
+    def preview_current_result(
+        self,
+        current: QListWidgetItem | None,
+        _previous: QListWidgetItem | None = None,
+    ) -> None:
+        if current is None:
+            self._clear_preview()
+            return
+        path = Path(current.text())
+        try:
+            content = self._searcher.read(path)
+        except (UnreadableFileError, OSError) as error:
+            self.preview_area.setExtraSelections([])
+            self.preview_area.setPlainText(f"プレビューできません: {error}")
+            return
+        self.preview_area.setPlainText(content)
+        query = self._query_for_preview()
+        if query is not None:
+            self._highlight_query(query)
+
+    def _query_for_preview(self) -> SearchQuery | None:
+        if self._active_query is not None:
+            return self._active_query
+        try:
+            return SearchQuery.parse(self.search_input.text(), case_sensitive=self.case_checkbox.isChecked())
+        except QuerySyntaxError:
+            return None
+
+    def _highlight_query(self, query: SearchQuery) -> None:
+        extra: list[QTextEdit.ExtraSelection] = []
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor("#fff59d"))
+        flags = QTextDocument.FindFlag.FindCaseSensitively if query.case_sensitive else QTextDocument.FindFlag(0)
+        first: QTextCursor | None = None
+        document = self.preview_area.document()
+        for term in (term for group in query.groups for term in group):
+            if not term:
+                continue
+            cursor = QTextCursor(document)
+            while True:
+                found = document.find(term, cursor, flags)
+                if found.isNull():
+                    break
+                selection = QTextEdit.ExtraSelection()
+                selection.cursor = QTextCursor(found)
+                selection.format = fmt
+                extra.append(selection)
+                if first is None:
+                    first = QTextCursor(found)
+                cursor = found
+        self.preview_area.setExtraSelections(extra)
+        if first is not None:
+            self.preview_area.setTextCursor(first)
+            self.preview_area.ensureCursorVisible()
+
+    def _clear_preview(self) -> None:
+        self.preview_area.setExtraSelections([])
+        self.preview_area.clear()
 
     def search_completed(self, summary: SearchSummary) -> None:
         prefix = "検索をキャンセルしました。" if summary.cancelled else "検索完了。"
