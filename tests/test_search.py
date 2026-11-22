@@ -1,3 +1,5 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -18,7 +20,7 @@ def reader():
 
 @pytest.fixture
 def searcher(reader):
-    return FileSearcher({".txt": reader})
+    return FileSearcher({".txt": reader}, max_workers=1)
 
 
 @pytest.fixture
@@ -38,10 +40,22 @@ def run_search(searcher, directory, text="needle", **overrides):
     return summary, callbacks
 
 
-def test正常系_searchメソッドが一致したファイルを名前順に通知すること(searcher, tree):
+def _read_by_name(results: dict[str, object]):
+    """並列実行でも順序に依存しないよう、ファイル名ごとに戻り値または例外を返す。"""
+
+    def read(path: Path):
+        result = results[path.name]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    return read
+
+
+def test正常系_searchメソッドが一致したファイルを通知すること(searcher, tree):
     _, callbacks = run_search(searcher, tree)
 
-    assert callbacks["on_match"].call_args_list == [
+    assert sorted(callbacks["on_match"].call_args_list, key=lambda item: item.args[0]) == [
         call(tree / "b.txt", 1, "needle"),
         call(tree / "sub" / "c.TXT", 1, "needle in sub"),
     ]
@@ -102,7 +116,7 @@ def test正常系_searchメソッドが読み取れないファイルを理由�
 
     summary, _ = run_search(searcher, tree)
 
-    assert summary.excluded[0] == ExcludedFile(tree / "a.txt", "文字コードを判定できません")
+    assert ExcludedFile(tree / "a.txt", "文字コードを判定できません") in summary.excluded
 
 
 def test正常系_searchメソッドが読み取れないファイルを照合件数に数えないこと(searcher, reader, tree):
@@ -114,7 +128,13 @@ def test正常系_searchメソッドが読み取れないファイルを照合�
 
 
 def test正常系_searchメソッドがOSエラーのファイルを除外して残りの検索を続けること(searcher, reader, tree):
-    reader.read.side_effect = [PermissionError(13, "Permission denied"), "needle", "needle"]
+    reader.read.side_effect = _read_by_name(
+        {
+            "a.txt": PermissionError(13, "Permission denied"),
+            "b.txt": "needle",
+            "c.TXT": "needle",
+        }
+    )
 
     summary, _ = run_search(searcher, tree)
 
@@ -122,7 +142,13 @@ def test正常系_searchメソッドがOSエラーのファイルを除外して
 
 
 def test正常系_searchメソッドがOSエラーの内容を除外理由に含めること(searcher, reader, tree):
-    reader.read.side_effect = [PermissionError(13, "Permission denied"), "needle", "needle"]
+    reader.read.side_effect = _read_by_name(
+        {
+            "a.txt": PermissionError(13, "Permission denied"),
+            "b.txt": "needle",
+            "c.TXT": "needle",
+        }
+    )
 
     summary, _ = run_search(searcher, tree)
 
@@ -140,7 +166,7 @@ def test正常系_searchメソッドが除外したファイルも進捗に数�
 def test正常系_searchメソッドが上限を超えるサイズのファイルを読まずに除外すること(reader, tmp_path):
     (tmp_path / "big.txt").write_text("needle" * 10, encoding="utf-8")
 
-    run_search(FileSearcher({".txt": reader}, max_file_bytes=10), tmp_path)
+    run_search(FileSearcher({".txt": reader}, max_file_bytes=10, max_workers=1), tmp_path)
 
     reader.read.assert_not_called()
 
@@ -148,7 +174,7 @@ def test正常系_searchメソッドが上限を超えるサイズのファイ�
 def test正常系_searchメソッドが上限ちょうどのサイズのファイルを検索すること(reader, tmp_path):
     (tmp_path / "edge.txt").write_text("needle", encoding="utf-8")
 
-    summary, _ = run_search(FileSearcher({".txt": reader}, max_file_bytes=6), tmp_path)
+    summary, _ = run_search(FileSearcher({".txt": reader}, max_file_bytes=6, max_workers=1), tmp_path)
 
     assert summary.matched_count == 1
 
@@ -156,7 +182,7 @@ def test正常系_searchメソッドが上限ちょうどのサイズのファ�
 def test正常系_searchメソッドがサイズ上限を除外理由にMB単位で示すこと(reader, tmp_path):
     (tmp_path / "big.txt").write_bytes(b"x" * (1024 * 1024 + 1))
 
-    summary, _ = run_search(FileSearcher({".txt": reader}, max_file_bytes=1024 * 1024), tmp_path)
+    summary, _ = run_search(FileSearcher({".txt": reader}, max_file_bytes=1024 * 1024, max_workers=1), tmp_path)
 
     assert summary.excluded == (ExcludedFile(tmp_path / "big.txt", "サイズが上限(1MB)を超えています"),)
 
@@ -205,7 +231,7 @@ def test正常系_searchメソッドがサブフォルダーを名前順にた�
 
 
 def test正常系_searchメソッドが大文字で登録された拡張子も対象にすること(reader, tree):
-    summary, _ = run_search(FileSearcher({".TXT": reader}), tree)
+    summary, _ = run_search(FileSearcher({".TXT": reader}, max_workers=1), tree)
 
     assert summary.target_count == 3
 
@@ -253,6 +279,73 @@ def test正常系_searchメソッドが走査中のキャンセルで対象を�
     summary, _ = run_search(searcher, tree, is_cancelled=MagicMock(side_effect=[False, True, True]))
 
     assert summary.target_count == 2
+
+
+def test正常系_searchメソッドがファイル名だけ一致したとき件数1とファイル名を通知すること(searcher, tmp_path):
+    (tmp_path / "needle.txt").write_text("hay", encoding="utf-8")
+
+    _, callbacks = run_search(searcher, tmp_path)
+
+    callbacks["on_match"].assert_called_once_with(tmp_path / "needle.txt", 1, "needle.txt")
+
+
+def test正常系_searchメソッドが本文とファイル名が両方一致するとき本文の抜粋を通知すること(searcher, tmp_path):
+    (tmp_path / "needle.txt").write_text("needle in body", encoding="utf-8")
+
+    _, callbacks = run_search(searcher, tmp_path)
+
+    callbacks["on_match"].assert_called_once_with(tmp_path / "needle.txt", 1, "needle in body")
+
+
+def test正常系_searchメソッドがファイル名が一致しないだけでは通知しないこと(searcher, tmp_path):
+    (tmp_path / "other.txt").write_text("hay", encoding="utf-8")
+
+    _, callbacks = run_search(searcher, tmp_path)
+
+    callbacks["on_match"].assert_not_called()
+
+
+def test正常系_searchメソッドが並列実行中のキャンセルをキャンセルありとして返すこと(reader, tmp_path):
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("x", encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+    cancelled = {"value": False}
+
+    def read(path: Path) -> str:
+        started.set()
+        release.wait(timeout=5)
+        return path.read_text(encoding="utf-8")
+
+    reader.read.side_effect = read
+
+    def request_cancel() -> None:
+        started.wait(timeout=5)
+        cancelled["value"] = True
+        release.set()
+
+    waiter = threading.Thread(target=request_cancel)
+    waiter.start()
+    try:
+        summary, _ = run_search(
+            FileSearcher({".txt": reader}, max_workers=2),
+            tmp_path,
+            is_cancelled=lambda: cancelled["value"],
+        )
+    finally:
+        release.set()
+        waiter.join(timeout=5)
+
+    assert summary.cancelled is True
+
+
+def test正常系_searchメソッドが指定したmax_workersでスレッドプールを作ること(reader, tmp_path):
+    (tmp_path / "a.txt").write_text("hay", encoding="utf-8")
+
+    with patch("quickfilelocator.search.ThreadPoolExecutor", wraps=ThreadPoolExecutor) as executor_cls:
+        run_search(FileSearcher({".txt": reader}, max_workers=2), tmp_path)
+
+    assert executor_cls.call_args.kwargs["max_workers"] == 2
 
 
 @pytest.mark.parametrize("name", ["missing", "b.txt"])

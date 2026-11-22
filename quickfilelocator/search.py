@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,9 +56,11 @@ class FileSearcher:
         self,
         readers: Mapping[str, FileReader],
         max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+        max_workers: int | None = None,
     ) -> None:
         self._readers = {suffix.lower(): reader for suffix, reader in readers.items()}
         self._max_file_bytes = max_file_bytes
+        self._max_workers = min(8, os.cpu_count() or 1) if max_workers is None else max_workers
 
     def search(
         self,
@@ -70,9 +74,9 @@ class FileSearcher:
         """directory 配下を検索する。
 
         一致するたびに on_match(パス, ヒット件数, 抜粋)、1ファイル処理するたびに
-        on_progress(処理済み件数, 対象件数) を呼ぶ。抜粋は最初のヒットを含む行を
-        1行にしたものである。is_cancelled が真を返すと、そこまでの結果を
-        cancelled=True で返す。
+        on_progress(処理済み件数, 対象件数) を呼ぶ。本文ヒットがあれば抜粋は最初の
+        ヒットを含む行を1行にしたもの、ファイル名だけ一致した場合はファイル名である。
+        is_cancelled が真を返すと、そこまでの結果を cancelled=True で返す。
         """
         if not directory.is_dir():
             raise SearchDirectoryError(f"検索先フォルダーが見つかりません: {directory}")
@@ -81,25 +85,60 @@ class FileSearcher:
         targets = self._collect_targets(directory, excluded, is_cancelled)
         searched_count = 0
         matched_count = 0
+        processed_count = 0
         cancelled = is_cancelled()
 
         if not cancelled:
-            on_progress(0, len(targets))
-            for processed_count, path in enumerate(targets, start=1):
+            target_count = len(targets)
+            on_progress(0, target_count)
+            lock = threading.Lock()
+
+            def process_file(path: Path) -> None:
+                nonlocal searched_count, matched_count, processed_count, cancelled
                 if is_cancelled():
-                    cancelled = True
-                    break
+                    with lock:
+                        cancelled = True
+                    return
                 try:
                     content = self.read(path)
                 except (UnreadableFileError, OSError) as error:
-                    excluded.append(ExcludedFile(path, self._describe(error)))
+                    reason = self._describe(error)
+                    with lock:
+                        excluded.append(ExcludedFile(path, reason))
+                        processed_count += 1
+                        on_progress(processed_count, target_count)
+                    return
+
+                hits = query.find_matches(content)
+                match_args: tuple[Path, int, str] | None
+                if hits:
+                    match_args = (path, len(hits), first_hit_snippet(content, hits))
+                elif query.matches(path.name):
+                    match_args = (path, 1, path.name)
                 else:
+                    match_args = None
+
+                with lock:
                     searched_count += 1
-                    hits = query.find_matches(content)
-                    if hits:
+                    if match_args is not None:
                         matched_count += 1
-                        on_match(path, len(hits), first_hit_snippet(content, hits))
-                on_progress(processed_count, len(targets))
+                        on_match(*match_args)
+                    processed_count += 1
+                    on_progress(processed_count, target_count)
+
+            with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+                futures = []
+                for path in targets:
+                    if is_cancelled():
+                        cancelled = True
+                        break
+                    futures.append(executor.submit(process_file, path))
+                for future in as_completed(futures):
+                    if is_cancelled():
+                        cancelled = True
+                    future.result()
+                if is_cancelled():
+                    cancelled = True
 
         return SearchSummary(
             target_count=len(targets),
