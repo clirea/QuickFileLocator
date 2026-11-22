@@ -15,6 +15,15 @@ from quickfilelocator.search import ExcludedFile, FileSearcher, SearchDirectoryE
 QUERY = SearchQuery.parse("needle")
 
 
+def long_preview_content(*, total: int = 200, hit_lines: tuple[int, ...] = (99,), token: str = "needle") -> str:
+    """1始まりの行番号付き本文。既定では 100 行目にヒットを置く。"""
+    lines = []
+    for index in range(total):
+        suffix = f" {token}" if index in hit_lines else ""
+        lines.append(f"LINE-{index + 1:03d}{suffix}")
+    return "\n".join(lines)
+
+
 def make_summary(**overrides):
     values = {"target_count": 5, "searched_count": 4, "matched_count": 2, "excluded": (), "cancelled": False}
     return SearchSummary(**{**values, **overrides})
@@ -161,6 +170,14 @@ def test正常系_initメソッドが大文字小文字を区別する設定で�
 
 def test正常系_initメソッドがキャンセルボタンを無効にしておくこと(window):
     assert window.cancel_button.isEnabled() is False
+
+
+def test正常系_initメソッドが上をもっと読むボタンの文言を出すこと(window):
+    assert window.load_more_above_button.text() == "上をもっと読む"
+
+
+def test正常系_initメソッドが下をもっと読むボタンの文言を出すこと(window):
+    assert window.load_more_below_button.text() == "下をもっと読む"
 
 
 def test正常系_initメソッドがプレビュー欄を結果一覧の右に置くこと(window):
@@ -447,11 +464,163 @@ def test正常系_next_hitメソッドが1件だけのとき進まないこと(w
     assert window.preview_label.text() == "プレビュー  1 / 1"
 
 
+def test正常系_preview_current_resultメソッドが短いファイルで上をもっと読むを無効にすること(window):
+    window.display_result("/data/a.txt")
+
+    assert window.load_more_above_button.isEnabled() is False
+
+
+def test正常系_preview_current_resultメソッドが短いファイルで下をもっと読むを無効にすること(window):
+    window.display_result("/data/a.txt")
+
+    assert window.load_more_below_button.isEnabled() is False
+
+
+def test正常系_preview_current_resultメソッドが長いファイルの先頭行を出さないこと(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    assert "LINE-001" not in window.preview_area.toPlainText()
+
+
+def test正常系_preview_current_resultメソッドが長いファイルの末尾行を出さないこと(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    assert "LINE-200" not in window.preview_area.toPlainText()
+
+
+def test正常系_preview_current_resultメソッドが長いファイルのヒット行を出すこと(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    assert "LINE-100 needle" in window.preview_area.toPlainText()
+
+
+def test正常系_preview_current_resultメソッドが長いファイルのヒット直前の行を出すこと(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    assert "LINE-099" in window.preview_area.toPlainText()
+
+
+def test正常系_preview_current_resultメソッドが長いファイルのヒット直後の行を出すこと(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    assert "LINE-101" in window.preview_area.toPlainText()
+
+
+def test正常系_preview_current_resultメソッドが長いファイルで上をもっと読むを有効にすること(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    assert window.load_more_above_button.isEnabled() is True
+
+
+def test正常系_preview_current_resultメソッドが長いファイルで下をもっと読むを有効にすること(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    assert window.load_more_below_button.isEnabled() is True
+
+
+def test正常系_load_more_aboveメソッドがより前の行を追加すること(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    window.load_more_above()
+
+    assert "LINE-001" in window.preview_area.toPlainText()
+
+
+def test正常系_load_more_belowメソッドがより後の行を追加すること(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    window.load_more_below()
+
+    assert "LINE-200" in window.preview_area.toPlainText()
+
+
+def test正常系_load_more_aboveメソッドが先頭では無効になること(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    window.load_more_above()
+
+    assert window.load_more_above_button.isEnabled() is False
+
+
+def test正常系_load_more_belowメソッドが末尾では無効になること(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    window.load_more_below()
+
+    assert window.load_more_below_button.isEnabled() is False
+
+
+def test正常系_next_hitメソッドが窓の外のヒットを表示すること(window, searcher):
+    searcher.read.return_value = long_preview_content(hit_lines=(99, 179))
+    window.display_result("/data/long.txt")
+
+    window.next_hit()
+
+    assert "LINE-180 needle" in window.preview_area.toPlainText()
+
+
+def test正常系_next_hitメソッドが再配置で元のヒット行を窓から外すこと(window, searcher):
+    searcher.read.return_value = long_preview_content(hit_lines=(99, 179))
+    window.display_result("/data/long.txt")
+
+    window.next_hit()
+
+    assert "LINE-100 needle" not in window.preview_area.toPlainText()
+
+
+def test正常系_preview_current_resultメソッドが窓内のヒット件数だけ強調すること(window, searcher):
+    searcher.read.return_value = long_preview_content(hit_lines=(99, 179))
+    window.display_result("/data/long.txt")
+
+    assert len(window.preview_area.extraSelections()) == 1
+
+
+def test正常系_load_more_belowメソッドが窓に入ったヒットを強調に足すこと(window, searcher):
+    searcher.read.return_value = long_preview_content(hit_lines=(99, 179))
+    window.display_result("/data/long.txt")
+
+    window.load_more_below()
+
+    assert len(window.preview_area.extraSelections()) == 2
+
+
+def test正常系_preview_current_resultメソッドが窓の外のヒットを含む全件数をラベルに出すこと(window, searcher):
+    searcher.read.return_value = long_preview_content(hit_lines=(99, 179))
+    window.display_result("/data/long.txt")
+
+    assert window.preview_label.text() == "プレビュー  1 / 2"
+
+
 def test異常系_preview_current_resultメソッドが読めないファイルの理由を出すこと(window, searcher):
     searcher.read.side_effect = UnreadableFileError("文字コードを判定できません")
     window.display_result("/data/bad.txt")
 
     assert window.preview_area.toPlainText() == "プレビューできません: 文字コードを判定できません"
+
+
+def test異常系_preview_current_resultメソッドが読めないファイルで上をもっと読むを無効にすること(window, searcher):
+    searcher.read.side_effect = UnreadableFileError("文字コードを判定できません")
+    window.display_result("/data/bad.txt")
+
+    assert window.load_more_above_button.isEnabled() is False
+
+
+def test異常系_preview_current_resultメソッドが読めないファイルで下をもっと読むを無効にすること(window, searcher):
+    searcher.read.side_effect = UnreadableFileError("文字コードを判定できません")
+    window.display_result("/data/bad.txt")
+
+    assert window.load_more_below_button.isEnabled() is False
 
 
 def test正常系_preview_current_resultメソッドが選択解除でプレビューを消すこと(window):
@@ -460,6 +629,24 @@ def test正常系_preview_current_resultメソッドが選択解除でプレビ�
     window.preview_current_result(None)
 
     assert window.preview_area.toPlainText() == ""
+
+
+def test正常系_preview_current_resultメソッドが選択解除で上をもっと読むを無効にすること(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    window.preview_current_result(None)
+
+    assert window.load_more_above_button.isEnabled() is False
+
+
+def test正常系_preview_current_resultメソッドが選択解除で下をもっと読むを無効にすること(window, searcher):
+    searcher.read.return_value = long_preview_content()
+    window.display_result("/data/long.txt")
+
+    window.preview_current_result(None)
+
+    assert window.load_more_below_button.isEnabled() is False
 
 
 def test正常系_search_completedメソッドが件数の内訳を表示すること(window):

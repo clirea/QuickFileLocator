@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Callable
 from pathlib import Path
 
@@ -15,7 +16,6 @@ from PyQt6.QtGui import (
     QShortcut,
     QTextCharFormat,
     QTextCursor,
-    QTextDocument,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -47,6 +47,16 @@ HIT_BACKGROUND = QColor("#fff59d")
 CURRENT_HIT_BACKGROUND = QColor("#ffcc80")
 PATH_ROLE = Qt.ItemDataRole.UserRole
 RELATIVE_PATH_COLOR = "#888888"
+PREVIEW_CONTEXT_LINES = 50
+
+
+def _line_starts(content: str) -> list[int]:
+    """本文の各行先頭の文字位置。空文字でも先頭行の 0 を含む。"""
+    starts = [0]
+    for index, char in enumerate(content):
+        if char == "\n":
+            starts.append(index + 1)
+    return starts
 
 
 def open_with_default_app(path: str) -> bool:
@@ -153,7 +163,11 @@ class MainWindow(QMainWindow):
         self._open_path = open_path
         self._close_requested = False
         self._active_query: SearchQuery | None = None
-        self._hit_cursors: list[QTextCursor] = []
+        self._preview_full_content = ""
+        self._preview_line_starts: list[int] = [0]
+        self._preview_start_line = 0
+        self._preview_end_line = 0
+        self._hit_spans: list[tuple[int, int]] = []
         self._hit_index = 0
         self.search_thread: SearchThread | None = None
 
@@ -225,11 +239,19 @@ class MainWindow(QMainWindow):
         preview_header.addStretch(1)
         preview_header.addWidget(self.previous_hit_button)
         preview_header.addWidget(self.next_hit_button)
+        self.load_more_above_button = QPushButton("上をもっと読む", self)
+        self.load_more_below_button = QPushButton("下をもっと読む", self)
+        self.load_more_above_button.setEnabled(False)
+        self.load_more_below_button.setEnabled(False)
+        self.load_more_above_button.clicked.connect(self.load_more_above)
+        self.load_more_below_button.clicked.connect(self.load_more_below)
         self.preview_area = QTextEdit(self)
         self.preview_area.setReadOnly(True)
         self.preview_area.setPlaceholderText("検索結果を選ぶと内容を表示します")
         preview_layout.addLayout(preview_header)
+        preview_layout.addWidget(self.load_more_above_button)
         preview_layout.addWidget(self.preview_area)
+        preview_layout.addWidget(self.load_more_below_button)
         next_hit_shortcut = QShortcut(QKeySequence("F3"), self)
         next_hit_shortcut.activated.connect(self.next_hit)
         previous_hit_shortcut = QShortcut(QKeySequence("Shift+F3"), self)
@@ -347,23 +369,37 @@ class MainWindow(QMainWindow):
             self._clear_preview()
             self.preview_area.setPlainText(f"プレビューできません: {error}")
             return
-        self.preview_area.setPlainText(content)
+        self._preview_full_content = content
+        self._preview_line_starts = _line_starts(content)
         query = self._query_for_preview()
-        if query is not None:
-            self._highlight_query(query)
-        else:
-            self._set_hits([])
+        self._hit_spans = list(query.find_matches(content)) if query is not None else []
+        self._hit_index = 0
+        self._set_initial_preview_window()
+        self._render_preview_window()
+
+    def load_more_above(self) -> None:
+        if self._preview_start_line <= 0:
+            return
+        self._preview_start_line = max(0, self._preview_start_line - PREVIEW_CONTEXT_LINES)
+        self._render_preview_window()
+
+    def load_more_below(self) -> None:
+        last_line = len(self._preview_line_starts) - 1
+        if self._preview_end_line >= last_line:
+            return
+        self._preview_end_line = min(last_line, self._preview_end_line + PREVIEW_CONTEXT_LINES)
+        self._render_preview_window()
 
     def next_hit(self) -> None:
-        if len(self._hit_cursors) < 2:
+        if len(self._hit_spans) < 2:
             return
-        self._hit_index = (self._hit_index + 1) % len(self._hit_cursors)
+        self._hit_index = (self._hit_index + 1) % len(self._hit_spans)
         self._reveal_current_hit()
 
     def previous_hit(self) -> None:
-        if len(self._hit_cursors) < 2:
+        if len(self._hit_spans) < 2:
             return
-        self._hit_index = (self._hit_index - 1) % len(self._hit_cursors)
+        self._hit_index = (self._hit_index - 1) % len(self._hit_spans)
         self._reveal_current_hit()
 
     def _item_path(self, item: QListWidgetItem) -> str:
@@ -378,65 +414,108 @@ class MainWindow(QMainWindow):
         except QuerySyntaxError:
             return None
 
-    def _highlight_query(self, query: SearchQuery) -> None:
-        flags = QTextDocument.FindFlag.FindCaseSensitively if query.case_sensitive else QTextDocument.FindFlag(0)
-        document = self.preview_area.document()
-        cursors: list[QTextCursor] = []
-        seen: set[tuple[int, int]] = set()
-        for term in query.unique_terms():
-            cursor = QTextCursor(document)
-            while True:
-                found = document.find(term, cursor, flags)
-                if found.isNull():
-                    break
-                span = (found.selectionStart(), found.selectionEnd())
-                if span not in seen:
-                    seen.add(span)
-                    cursors.append(QTextCursor(found))
-                cursor = found
-        cursors.sort(key=lambda item: item.selectionStart())
-        self._set_hits(cursors)
-
-    def _set_hits(self, cursors: list[QTextCursor]) -> None:
-        self._hit_cursors = cursors
-        self._hit_index = 0
-        if cursors:
-            self._reveal_current_hit()
+    def _set_initial_preview_window(self) -> None:
+        last_line = len(self._preview_line_starts) - 1
+        if self._hit_spans:
+            hit_line = self._line_index_for_offset(self._hit_spans[0][0])
+            self._preview_start_line = max(0, hit_line - PREVIEW_CONTEXT_LINES)
+            self._preview_end_line = min(last_line, hit_line + PREVIEW_CONTEXT_LINES)
             return
-        self.preview_area.setExtraSelections([])
-        self.preview_label.setText("プレビュー")
-        self.next_hit_button.setEnabled(False)
-        self.previous_hit_button.setEnabled(False)
+        self._preview_start_line = 0
+        self._preview_end_line = min(last_line, PREVIEW_CONTEXT_LINES * 2)
 
-    def _reveal_current_hit(self) -> None:
+    def _visible_offsets(self) -> tuple[int, int]:
+        starts = self._preview_line_starts
+        start = starts[self._preview_start_line]
+        if self._preview_end_line + 1 < len(starts):
+            return start, starts[self._preview_end_line + 1]
+        return start, len(self._preview_full_content)
+
+    def _line_index_for_offset(self, offset: int) -> int:
+        index = bisect_right(self._preview_line_starts, offset) - 1
+        return max(0, min(index, len(self._preview_line_starts) - 1))
+
+    def _span_overlaps_visible(self, span: tuple[int, int]) -> bool:
+        visible_start, visible_end = self._visible_offsets()
+        return span[1] > visible_start and span[0] < visible_end
+
+    def _recenter_window_on_offset(self, offset: int) -> None:
+        last_line = len(self._preview_line_starts) - 1
+        hit_line = self._line_index_for_offset(offset)
+        self._preview_start_line = max(0, hit_line - PREVIEW_CONTEXT_LINES)
+        self._preview_end_line = min(last_line, hit_line + PREVIEW_CONTEXT_LINES)
+
+    def _widget_cursor_for_span(self, span: tuple[int, int]) -> QTextCursor:
+        visible_start, visible_end = self._visible_offsets()
+        start = max(span[0], visible_start) - visible_start
+        end = min(span[1], visible_end) - visible_start
+        cursor = QTextCursor(self.preview_area.document())
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        return cursor
+
+    def _render_preview_window(self) -> None:
+        visible_start, visible_end = self._visible_offsets()
+        self.preview_area.setPlainText(self._preview_full_content[visible_start:visible_end])
+        self._apply_hit_decorations()
+        self._update_load_more_buttons()
+
+    def _apply_hit_decorations(self) -> None:
+        if not self._hit_spans:
+            self.preview_area.setExtraSelections([])
+            self.preview_label.setText("プレビュー")
+            self.next_hit_button.setEnabled(False)
+            self.previous_hit_button.setEnabled(False)
+            return
         other_format = QTextCharFormat()
         other_format.setBackground(HIT_BACKGROUND)
         current_format = QTextCharFormat()
         current_format.setBackground(CURRENT_HIT_BACKGROUND)
+        current_span = self._hit_spans[self._hit_index]
         extras: list[QTextEdit.ExtraSelection] = []
-        for index, cursor in enumerate(self._hit_cursors):
+        for span in self._hit_spans:
+            if not self._span_overlaps_visible(span):
+                continue
             selection = QTextEdit.ExtraSelection()
-            selection.cursor = QTextCursor(cursor)
-            selection.format = current_format if index == self._hit_index else other_format
+            selection.cursor = self._widget_cursor_for_span(span)
+            selection.format = current_format if span == current_span else other_format
             extras.append(selection)
         self.preview_area.setExtraSelections(extras)
-        current = QTextCursor(self._hit_cursors[self._hit_index])
-        self.preview_area.setTextCursor(current)
-        self.preview_area.ensureCursorVisible()
-        total = len(self._hit_cursors)
+        if self._span_overlaps_visible(current_span):
+            current = self._widget_cursor_for_span(current_span)
+            self.preview_area.setTextCursor(current)
+            self.preview_area.ensureCursorVisible()
+        total = len(self._hit_spans)
         self.preview_label.setText(f"プレビュー  {self._hit_index + 1} / {total}")
         movable = total > 1
         self.next_hit_button.setEnabled(movable)
         self.previous_hit_button.setEnabled(movable)
 
+    def _update_load_more_buttons(self) -> None:
+        last_line = len(self._preview_line_starts) - 1
+        self.load_more_above_button.setEnabled(self._preview_start_line > 0)
+        self.load_more_below_button.setEnabled(self._preview_end_line < last_line)
+
+    def _reveal_current_hit(self) -> None:
+        current_span = self._hit_spans[self._hit_index]
+        if not self._span_overlaps_visible(current_span):
+            self._recenter_window_on_offset(current_span[0])
+        self._render_preview_window()
+
     def _clear_preview(self) -> None:
-        self._hit_cursors = []
+        self._preview_full_content = ""
+        self._preview_line_starts = [0]
+        self._preview_start_line = 0
+        self._preview_end_line = 0
+        self._hit_spans = []
         self._hit_index = 0
         self.preview_area.setExtraSelections([])
         self.preview_area.clear()
         self.preview_label.setText("プレビュー")
         self.next_hit_button.setEnabled(False)
         self.previous_hit_button.setEnabled(False)
+        self.load_more_above_button.setEnabled(False)
+        self.load_more_below_button.setEnabled(False)
 
     def search_completed(self, summary: SearchSummary) -> None:
         prefix = "検索をキャンセルしました。" if summary.cancelled else "検索完了。"
