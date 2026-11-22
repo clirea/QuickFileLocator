@@ -150,6 +150,29 @@ def test正常系_searchメソッドがサイズ上限を除外理由にMB単位
     assert summary.excluded == (ExcludedFile(tmp_path / "big.txt", "サイズが上限(1MB)を超えています"),)
 
 
+def test正常系_readメソッドが本文を返すこと(searcher, tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_text("hello", encoding="utf-8")
+
+    assert searcher.read(path) == "hello"
+
+
+def test異常系_readメソッドが上限超過でUnreadableFileErrorを出すこと(reader, tmp_path):
+    path = tmp_path / "big.txt"
+    path.write_text("needle" * 10, encoding="utf-8")
+
+    with pytest.raises(UnreadableFileError, match="サイズが上限"):
+        FileSearcher({".txt": reader}, max_file_bytes=10).read(path)
+
+
+def test異常系_readメソッドが未対応の拡張子でUnreadableFileErrorを出すこと(searcher, tmp_path):
+    path = tmp_path / "a.png"
+    path.write_text("x", encoding="utf-8")
+
+    with pytest.raises(UnreadableFileError, match="未対応の拡張子"):
+        searcher.read(path)
+
+
 def test正常系_searchメソッドが読み取れないフォルダーを除外に記録すること(searcher, tmp_path):
     def fake_walk(directory, onerror):
         onerror(PermissionError(13, "Permission denied", str(tmp_path / "secret")))

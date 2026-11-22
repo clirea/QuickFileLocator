@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QApplication
 from quickfilelocator import gui
 from quickfilelocator.gui import MainWindow, SearchThread
 from quickfilelocator.query import SearchQuery
-from quickfilelocator.readers import default_readers
+from quickfilelocator.readers import UnreadableFileError, default_readers
 from quickfilelocator.search import ExcludedFile, FileSearcher, SearchDirectoryError, SearchSummary
 
 QUERY = SearchQuery.parse("needle")
@@ -24,6 +24,7 @@ def make_summary(**overrides):
 def searcher():
     mock = MagicMock()
     mock.search.return_value = make_summary()
+    mock.read.return_value = "needle in a haystack"
     return mock
 
 
@@ -162,6 +163,13 @@ def test正常系_initメソッドがキャンセルボタンを無効にして�
     assert window.cancel_button.isEnabled() is False
 
 
+def test正常系_initメソッドがプレビュー欄を結果一覧の右に置くこと(window):
+    window.show()
+    result_x = window.result_list.mapTo(window, window.result_list.rect().topLeft()).x()
+    preview_x = window.preview_area.mapTo(window, window.preview_area.rect().topLeft()).x()
+    assert result_x < preview_x
+
+
 def test正常系_choose_directoryメソッドが選択されたフォルダーを入力欄に反映すること(window):
     with patch.object(gui.QFileDialog, "getExistingDirectory", return_value="/picked"):
         window.choose_directory()
@@ -212,6 +220,14 @@ def test正常系_start_searchメソッドが前回の結果を消すこと(wind
     window.start_search()
 
     assert window.result_list.count() == 0
+
+
+def test正常系_start_searchメソッドがプレビューを消すこと(window):
+    window.display_result("/old/result.txt")
+
+    window.start_search()
+
+    assert window.preview_area.toPlainText() == ""
 
 
 def test正常系_start_searchメソッドが前回の除外一覧を隠すこと(window):
@@ -320,6 +336,50 @@ def test正常系_display_resultメソッドが結果を一覧に追加するこ
     window.display_result("/data/a.txt")
 
     assert window.result_list.item(0).text() == "/data/a.txt"
+
+
+def test正常系_display_resultメソッドが最初の結果の本文をプレビューすること(window, searcher):
+    window.display_result("/data/a.txt")
+
+    assert window.preview_area.toPlainText() == "needle in a haystack"
+
+
+def test正常系_display_resultメソッドが最初の結果をsearcherのreadに渡すこと(window, searcher):
+    window.display_result("/data/a.txt")
+
+    searcher.read.assert_called_once_with(Path("/data/a.txt"))
+
+
+def test正常系_preview_current_resultメソッドが選択したファイルの本文を出すこと(window, searcher):
+    searcher.read.side_effect = lambda path: f"body of {path.name}"
+    window.display_result("/data/a.txt")
+    window.display_result("/data/b.txt")
+
+    window.result_list.setCurrentRow(1)
+
+    assert window.preview_area.toPlainText() == "body of b.txt"
+
+
+def test正常系_preview_current_resultメソッドが検索語を強調すること(window, searcher):
+    searcher.read.return_value = "needle here needle"
+    window.display_result("/data/a.txt")
+
+    assert len(window.preview_area.extraSelections()) == 2
+
+
+def test異常系_preview_current_resultメソッドが読めないファイルの理由を出すこと(window, searcher):
+    searcher.read.side_effect = UnreadableFileError("文字コードを判定できません")
+    window.display_result("/data/bad.txt")
+
+    assert window.preview_area.toPlainText() == "プレビューできません: 文字コードを判定できません"
+
+
+def test正常系_preview_current_resultメソッドが選択解除でプレビューを消すこと(window):
+    window.display_result("/data/a.txt")
+
+    window.preview_current_result(None)
+
+    assert window.preview_area.toPlainText() == ""
 
 
 def test正常系_search_completedメソッドが件数の内訳を表示すること(window):
@@ -436,6 +496,7 @@ def test正常系_copy_selected_resultsメソッドが選択したパスを改�
 def test正常系_copy_selected_resultsメソッドが未選択のときクリップボードを変えないこと(window, qapp):
     qapp.clipboard().setText("keep")
     window.display_result("/data/a.txt")
+    window.result_list.clearSelection()
 
     window.copy_selected_results()
 
@@ -489,6 +550,13 @@ def real_window(qapp, tmp_path):
     yield main_window
     wait_until_idle(main_window)
     main_window.close()
+
+
+def test正常系_start_searchメソッドが最初のヒットをプレビューすること(real_window):
+    real_window.start_search()
+    wait_until_idle(real_window)
+
+    assert real_window.preview_area.toPlainText() == "needle"
 
 
 def test正常系_start_searchメソッドが実スレッドの検索結果を一覧に表示すること(real_window, tmp_path):

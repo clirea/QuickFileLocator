@@ -79,7 +79,7 @@ class FileSearcher:
                     cancelled = True
                     break
                 try:
-                    content = self._read(path)
+                    content = self.read(path)
                 except (UnreadableFileError, OSError) as error:
                     excluded.append(ExcludedFile(path, self._describe(error)))
                 else:
@@ -118,12 +118,16 @@ class FileSearcher:
             )
         return targets
 
-    def _read(self, path: Path) -> str:
+    def read(self, path: Path) -> str:
+        """1ファイルの本文を返す。プレビュー表示でも使う。"""
         size = path.stat().st_size
         if size > self._max_file_bytes:
             limit_mb = self._max_file_bytes / (1024 * 1024)
             raise UnreadableFileError(f"サイズが上限({limit_mb:g}MB)を超えています")
-        return self._readers[path.suffix.lower()].read(path)
+        suffix = path.suffix.lower()
+        if suffix not in self._readers:
+            raise UnreadableFileError(f"未対応の拡張子です ({suffix or 'なし'})")
+        return self._readers[suffix].read(path)
 
     @staticmethod
     def _describe(error: Exception) -> str:
