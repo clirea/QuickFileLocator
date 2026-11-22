@@ -3,7 +3,7 @@ import sys
 import chardet
 import re
 import docx
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
     QTextEdit,
@@ -17,7 +17,9 @@ from PyQt5.QtWidgets import (
     QStatusBar,
     QFileDialog,
 )
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal
+
+MAX_SEARCH_FILE_BYTES = 32 * 1024 * 1024
 
 
 class SearchDirectoryError(ValueError):
@@ -50,6 +52,10 @@ class SearchThread(QThread):
         self.search_files(self.search_string, self.search_directory)
         self.search_completed.emit(self.files_searched, self.files_excluded, self.excluded_files)  # 検索したファイル数、除外したファイル数、除外したファイル名を渡す
 
+    def _exclude_file(self, file_path):
+        self.files_excluded += 1
+        self.excluded_files.append(file_path)
+
     def search_files(self, search_string, directory):
         extensions = [".docx", ".txt"]
 
@@ -69,10 +75,16 @@ class SearchThread(QThread):
                 if file.endswith(tuple(extensions)):
                     file_path = os.path.join(root, file)
                     try:
+                        try:
+                            if os.path.getsize(file_path) > MAX_SEARCH_FILE_BYTES:
+                                self._exclude_file(file_path)
+                                continue
+                        except OSError:
+                            pass
+
                         if file.endswith(".docx"):
                             if file.startswith("~$"):  # 開いているファイルを除外
-                                self.files_excluded += 1
-                                self.excluded_files.append(file_path)
+                                self._exclude_file(file_path)
                                 continue
                             doc = docx.Document(file_path)
                             content = "\n".join([para.text for para in doc.paragraphs])
@@ -80,12 +92,13 @@ class SearchThread(QThread):
                             with open(file_path, "rb") as f:
                                 content_bytes = f.read()
                             encoding = chardet.detect(content_bytes)["encoding"]
+                            if not encoding:
+                                self._exclude_file(file_path)
+                                continue
                             try:
                                 content = content_bytes.decode(encoding)
-                            except UnicodeDecodeError:
-                                # デコードエラーが発生した場合は除外
-                                self.files_excluded += 1
-                                self.excluded_files.append(file_path)
+                            except (UnicodeDecodeError, LookupError):
+                                self._exclude_file(file_path)
                                 continue
 
                         # アンド検索とオア検索の条件を確認
@@ -109,9 +122,8 @@ class SearchThread(QThread):
 
                         if match:
                             self.result_found.emit(file_path)
-                    except (docx.opc.exceptions.PackageNotFoundError, IOError):
-                        self.files_excluded += 1
-                        self.excluded_files.append(file_path)
+                    except Exception:
+                        self._exclude_file(file_path)
 
                 processed_files += 1
                 self.files_searched += 1  # 検索したファイル数をカウント
@@ -220,4 +232,4 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     main_window = MainWindow()
     main_window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
