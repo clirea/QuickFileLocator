@@ -41,7 +41,10 @@ def run_search(searcher, directory, text="needle", **overrides):
 def test正常系_searchメソッドが一致したファイルを名前順に通知すること(searcher, tree):
     _, callbacks = run_search(searcher, tree)
 
-    assert callbacks["on_match"].call_args_list == [call(tree / "b.txt", 1), call(tree / "sub" / "c.TXT", 1)]
+    assert callbacks["on_match"].call_args_list == [
+        call(tree / "b.txt", 1, "needle"),
+        call(tree / "sub" / "c.TXT", 1, "needle in sub"),
+    ]
 
 
 def test正常系_searchメソッドが対象拡張子のファイルだけを対象件数に数えること(searcher, tree):
@@ -67,7 +70,7 @@ def test正常系_searchメソッドがファイル内のヒット件数を通�
 
     _, callbacks = run_search(searcher, tmp_path)
 
-    assert callbacks["on_match"].call_args == call(tmp_path / "multi.txt", 2)
+    assert callbacks["on_match"].call_args == call(tmp_path / "multi.txt", 2, "needle")
 
 
 def test正常系_searchメソッドが最後まで検索したときキャンセルなしとして返すこと(searcher, tree):

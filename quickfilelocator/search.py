@@ -14,6 +14,16 @@ from quickfilelocator.readers import FileReader, UnreadableFileError
 DEFAULT_MAX_FILE_BYTES = 100 * 1024 * 1024
 
 
+def first_hit_snippet(content: str, hits: tuple[tuple[int, int], ...]) -> str:
+    """最初のヒットを含む行を、折り返さず1行の抜粋として返す。"""
+    start, _end = hits[0]
+    line_start = content.rfind("\n", 0, start) + 1
+    line_end = content.find("\n", start)
+    if line_end < 0:
+        line_end = len(content)
+    return content[line_start:line_end].replace("\r", "")
+
+
 class SearchDirectoryError(Exception):
     """検索先フォルダーを使えないときに送出する。メッセージはそのまま画面に表示する。"""
 
@@ -53,15 +63,16 @@ class FileSearcher:
         query: SearchQuery,
         directory: Path,
         *,
-        on_match: Callable[[Path, int], None],
+        on_match: Callable[[Path, int, str], None],
         on_progress: Callable[[int, int], None],
         is_cancelled: Callable[[], bool] = lambda: False,
     ) -> SearchSummary:
         """directory 配下を検索する。
 
-        一致するたびに on_match(パス, ヒット件数)、1ファイル処理するたびに
-        on_progress(処理済み件数, 対象件数) を呼ぶ。is_cancelled が真を返すと、
-        そこまでの結果を cancelled=True で返す。
+        一致するたびに on_match(パス, ヒット件数, 抜粋)、1ファイル処理するたびに
+        on_progress(処理済み件数, 対象件数) を呼ぶ。抜粋は最初のヒットを含む行を
+        1行にしたものである。is_cancelled が真を返すと、そこまでの結果を
+        cancelled=True で返す。
         """
         if not directory.is_dir():
             raise SearchDirectoryError(f"検索先フォルダーが見つかりません: {directory}")
@@ -87,7 +98,7 @@ class FileSearcher:
                     hits = query.find_matches(content)
                     if hits:
                         matched_count += 1
-                        on_match(path, len(hits))
+                        on_match(path, len(hits), first_hit_snippet(content, hits))
                 on_progress(processed_count, len(targets))
 
         return SearchSummary(

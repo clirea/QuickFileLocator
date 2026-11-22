@@ -11,6 +11,7 @@ from PyQt6.QtGui import (
     QColor,
     QDesktopServices,
     QKeySequence,
+    QResizeEvent,
     QShortcut,
     QTextCharFormat,
     QTextCursor,
@@ -30,6 +31,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTextEdit,
@@ -44,6 +46,7 @@ from quickfilelocator.search import FileSearcher, SearchDirectoryError, SearchSu
 HIT_BACKGROUND = QColor("#fff59d")
 CURRENT_HIT_BACKGROUND = QColor("#ffcc80")
 PATH_ROLE = Qt.ItemDataRole.UserRole
+RELATIVE_PATH_COLOR = "#888888"
 
 
 def open_with_default_app(path: str) -> bool:
@@ -51,9 +54,56 @@ def open_with_default_app(path: str) -> bool:
     return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
+class ElidedLabel(QLabel):
+    """幅に合わせて右省略するラベル。"""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full_text = text
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    @property
+    def full_text(self) -> str:
+        return self._full_text
+
+    def resizeEvent(self, event: QResizeEvent | None) -> None:
+        elided = self.fontMetrics().elidedText(self._full_text, Qt.TextElideMode.ElideRight, max(self.width(), 0))
+        self.setText(elided)
+        super().resizeEvent(event)
+
+
+class ResultItemWidget(QWidget):
+    """検索結果1件を、ファイル名・相対パス・抜粋の2段で示す。"""
+
+    def __init__(self, name_text: str, relative_path: str, snippet: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(2)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        self.name_label = QLabel(name_text, self)
+        self.name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.path_label = QLabel(relative_path, self)
+        self.path_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.path_label.setStyleSheet(f"color: {RELATIVE_PATH_COLOR};")
+        row.addWidget(self.name_label)
+        row.addStretch(1)
+        row.addWidget(self.path_label)
+
+        self.snippet_label = ElidedLabel(snippet, self)
+        self.snippet_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        layout.addLayout(row)
+        layout.addWidget(self.snippet_label)
+
+
 class SearchThread(QThread):
     progress_update = pyqtSignal(int, int)  # 処理済み件数、対象件数
-    result_found = pyqtSignal(str, int)  # パス、ファイル内ヒット件数
+    result_found = pyqtSignal(str, int, str)  # パス、ファイル内ヒット件数、抜粋
     search_completed = pyqtSignal(object)  # SearchSummary
     search_failed = pyqtSignal(str)
 
@@ -70,7 +120,7 @@ class SearchThread(QThread):
             summary = self._searcher.search(
                 self._query,
                 self._directory,
-                on_match=lambda path, hit_count: self.result_found.emit(str(path), hit_count),
+                on_match=lambda path, hit_count, snippet: self.result_found.emit(str(path), hit_count, snippet),
                 on_progress=self._report_progress,
                 is_cancelled=self.isInterruptionRequested,
             )
@@ -259,12 +309,28 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(processed_count)
         self.status_bar.showMessage(f"検索中: {processed_count} / {total_count} 件")
 
-    def display_result(self, result: str, hit_count: int = 1) -> None:
-        item = QListWidgetItem(f"{result}  ({hit_count}件)")
+    def display_result(self, result: str, hit_count: int = 1, snippet: str = "") -> None:
+        path = Path(result)
+        item = QListWidgetItem()
         item.setData(PATH_ROLE, result)
+        widget = ResultItemWidget(
+            f"{path.name}  ({hit_count}件)",
+            self._relative_display_path(path),
+            snippet,
+            self.result_list,
+        )
         self.result_list.addItem(item)
+        self.result_list.setItemWidget(item, widget)
+        item.setSizeHint(widget.sizeHint())
         if self.result_list.currentItem() is None:
             self.result_list.setCurrentRow(0)
+
+    def _relative_display_path(self, path: Path) -> str:
+        try:
+            directory = Path(self.directory_input.text().strip()).expanduser()
+            return str(path.relative_to(directory))
+        except ValueError:
+            return str(path)
 
     def preview_current_result(
         self,

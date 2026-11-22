@@ -7,7 +7,7 @@ from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import QApplication
 
 from quickfilelocator import gui
-from quickfilelocator.gui import MainWindow, SearchThread
+from quickfilelocator.gui import PATH_ROLE, MainWindow, SearchThread
 from quickfilelocator.query import SearchQuery
 from quickfilelocator.readers import UnreadableFileError, default_readers
 from quickfilelocator.search import ExcludedFile, FileSearcher, SearchDirectoryError, SearchSummary
@@ -54,12 +54,12 @@ def test正常系_runメソッドが検索結果を完了シグナルで通知�
 
 
 def test正常系_runメソッドが一致したパスとヒット件数を通知すること(thread, searcher):
-    searcher.search.side_effect = lambda *args, on_match, **kwargs: on_match(Path("/data/a.txt"), 3)
+    searcher.search.side_effect = lambda *args, on_match, **kwargs: on_match(Path("/data/a.txt"), 3, "needle line")
     found = collect(thread.result_found)
 
     thread.run()
 
-    assert found == [(str(Path("/data/a.txt")), 3)]
+    assert found == [(str(Path("/data/a.txt")), 3, "needle line")]
 
 
 def test正常系_runメソッドが中断要求の有無をキャンセル判定として渡すこと(thread, searcher):
@@ -335,13 +335,36 @@ def test正常系_update_progressメソッドが対象0件でも進捗バーを�
 def test正常系_display_resultメソッドが結果を一覧に追加すること(window):
     window.display_result("/data/a.txt")
 
-    assert window.result_list.item(0).text() == "/data/a.txt  (1件)"
+    assert window.result_list.item(0).data(PATH_ROLE) == "/data/a.txt"
 
 
 def test正常系_display_resultメソッドがファイル内のヒット件数を表示すること(window):
     window.display_result("/data/a.txt", 3)
 
-    assert window.result_list.item(0).text() == "/data/a.txt  (3件)"
+    widget = window.result_list.itemWidget(window.result_list.item(0))
+    assert widget.name_label.text() == "a.txt  (3件)"
+
+
+def test正常系_display_resultメソッドがファイル名と件数を出すこと(window):
+    window.display_result("/data/notes.txt", 3, "hello")
+
+    widget = window.result_list.itemWidget(window.result_list.item(0))
+    assert widget.name_label.text() == "notes.txt  (3件)"
+
+
+def test正常系_display_resultメソッドが相対パスを出すこと(window, tmp_path):
+    nested = tmp_path / "sub" / "notes.txt"
+    window.display_result(str(nested), 1, "hello")
+
+    widget = window.result_list.itemWidget(window.result_list.item(0))
+    assert widget.path_label.text() == str(Path("sub") / "notes.txt")
+
+
+def test正常系_display_resultメソッドが抜粋を出すこと(window):
+    window.display_result("/data/notes.txt", 1, "needle in a haystack")
+
+    widget = window.result_list.itemWidget(window.result_list.item(0))
+    assert widget.snippet_label.full_text == "needle in a haystack"
 
 
 def test正常系_display_resultメソッドが最初の結果の本文をプレビューすること(window, searcher):
@@ -620,8 +643,8 @@ def test正常系_start_searchメソッドが実スレッドの検索結果を�
     real_window.start_search()
     wait_until_idle(real_window)
 
-    assert [real_window.result_list.item(i).text() for i in range(real_window.result_list.count())] == [
-        f"{tmp_path / 'hit.txt'}  (1件)"
+    assert [real_window.result_list.item(i).data(PATH_ROLE) for i in range(real_window.result_list.count())] == [
+        str(tmp_path / "hit.txt")
     ]
 
 
