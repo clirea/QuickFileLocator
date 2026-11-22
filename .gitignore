@@ -119,6 +119,9 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Agent scratch reports
+_agent_reports/
+
 # Environments
 .env
 .venv

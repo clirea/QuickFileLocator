@@ -40,7 +40,7 @@ def launched():
         patch.object(app, "MainWindow") as window_class,
     ):
         application_class.return_value.arguments.return_value = ["main.py", "/data/docs"]
-        application_class.return_value.exec_.return_value = 7
+        application_class.return_value.exec.return_value = 7
         yield MagicMock(application_class=application_class, window_class=window_class)
 
 

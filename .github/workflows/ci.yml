@@ -8,6 +8,8 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen
     strategy:
       fail-fast: false
       matrix:
@@ -22,3 +24,4 @@ jobs:
       - run: python -m ruff check .
       - run: python -m ruff format --check .
       - run: python -m pytest
+      - run: python -m pip_audit -r requirements.txt

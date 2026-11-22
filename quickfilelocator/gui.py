@@ -1,13 +1,13 @@
-"""PyQt5 の画面と、検索を別スレッドで実行する仕組み。"""
+"""PyQt6 の画面と、検索を別スレッドで実行する仕組み。"""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
 
-from PyQt5.QtCore import QThread, QUrl, pyqtSignal
-from PyQt5.QtGui import QCloseEvent, QDesktopServices, QKeySequence
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QThread, QUrl, pyqtSignal
+from PyQt6.QtGui import QCloseEvent, QDesktopServices, QKeySequence, QShortcut
+from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
@@ -21,7 +21,6 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
-    QShortcut,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -128,11 +127,11 @@ class MainWindow(QMainWindow):
         layout.addLayout(button_layout)
 
         self.result_list = QListWidget(self)
-        self.result_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.result_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.result_list.setToolTip("ダブルクリックでファイルを開きます。選択してコピーもできます。")
         self.result_list.itemActivated.connect(self.open_result)
         layout.addWidget(self.result_list, 3)
-        copy_shortcut = QShortcut(QKeySequence.Copy, self.result_list)
+        copy_shortcut = QShortcut(QKeySequence.StandardKey.Copy, self.result_list)
         copy_shortcut.activated.connect(self.copy_selected_results)
 
         self.excluded_label = QLabel("除外されたファイル:", self)

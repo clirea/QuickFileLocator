@@ -6,7 +6,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication
 
 from quickfilelocator.gui import MainWindow
 from quickfilelocator.readers import default_readers
@@ -36,4 +36,4 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     main_window = MainWindow(FileSearcher(default_readers()), directory)
     main_window.show()
-    return app.exec_()
+    return app.exec()

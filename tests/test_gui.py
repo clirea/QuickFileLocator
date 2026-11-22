@@ -3,8 +3,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt5.QtGui import QCloseEvent
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtWidgets import QApplication
 
 from quickfilelocator import gui
 from quickfilelocator.gui import MainWindow, SearchThread
