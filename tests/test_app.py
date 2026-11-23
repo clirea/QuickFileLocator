@@ -32,16 +32,46 @@ def test正常系_default_search_directoryメソッドがスクリプト実行�
     assert result == cwd
 
 
+def test正常系_default_search_directoryメソッドが保存された既存フォルダーをカレントより優先すること(tmp_path, cwd):
+    saved = tmp_path / "saved"
+    saved.mkdir()
+
+    result = default_search_directory([], frozen=False, executable="/usr/bin/python3", cwd=cwd, last_directory=saved)
+
+    assert result == saved
+
+
+def test正常系_default_search_directoryメソッドが存在しない保存先ならカレントを返すこと(tmp_path, cwd):
+    result = default_search_directory(
+        [], frozen=False, executable="/usr/bin/python3", cwd=cwd, last_directory=tmp_path / "missing"
+    )
+
+    assert result == cwd
+
+
+def test正常系_default_search_directoryメソッドが保存があっても引数を優先すること(tmp_path, cwd):
+    saved = tmp_path / "saved"
+    saved.mkdir()
+
+    result = default_search_directory(
+        ["/data/docs"], frozen=True, executable="/opt/app/app.exe", cwd=cwd, last_directory=saved
+    )
+
+    assert result == Path("/data/docs")
+
+
 @pytest.fixture
 def launched():
     """QApplication と MainWindow を差し替えて main を実行できるようにする。"""
     with (
         patch.object(app, "QApplication") as application_class,
         patch.object(app, "MainWindow") as window_class,
+        patch.object(app, "QSettings") as settings_class,
     ):
         application_class.return_value.arguments.return_value = ["main.py", "/data/docs"]
         application_class.return_value.exec.return_value = 7
-        yield MagicMock(application_class=application_class, window_class=window_class)
+        settings_class.return_value.value.return_value = None
+        yield MagicMock(application_class=application_class, window_class=window_class, settings_class=settings_class)
 
 
 def test正常系_mainメソッドが起動引数のフォルダーを初期の検索先として画面へ渡すこと(launched):

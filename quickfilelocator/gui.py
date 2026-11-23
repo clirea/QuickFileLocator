@@ -6,11 +6,13 @@ from bisect import bisect_right
 from collections.abc import Callable
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt6.QtCore import QByteArray, QSettings, Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QCloseEvent,
     QColor,
     QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
     QKeySequence,
     QResizeEvent,
     QShortcut,
@@ -21,6 +23,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -42,10 +45,32 @@ from PyQt6.QtWidgets import (
 from quickfilelocator.query import QuerySyntaxError, SearchQuery
 from quickfilelocator.readers import UnreadableFileError
 from quickfilelocator.search import FileSearcher, SearchDirectoryError, SearchSummary
+from quickfilelocator.settings import (
+    APPLICATION_NAME,
+    DEFAULT_SORT_MODE,
+    KEY_CASE_SENSITIVE,
+    KEY_DIRECTORY,
+    KEY_GEOMETRY,
+    KEY_RECENT_FOLDERS,
+    KEY_REGEX,
+    KEY_SORT_MODE,
+    KEY_SPLITTER,
+    ORGANIZATION_NAME,
+    SORT_BY_HITS,
+    SORT_BY_PATH,
+    SORT_MODES,
+    as_bool,
+    existing_recent_folders,
+    push_recent_folder,
+)
 
 HIT_BACKGROUND = QColor("#fff59d")
 CURRENT_HIT_BACKGROUND = QColor("#ffcc80")
 PATH_ROLE = Qt.ItemDataRole.UserRole
+HIT_COUNT_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+RELATIVE_PATH_ROLE = int(Qt.ItemDataRole.UserRole) + 2
+NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 3
+SNIPPET_ROLE = int(Qt.ItemDataRole.UserRole) + 4
 RELATIVE_PATH_COLOR = "#888888"
 PREVIEW_CONTEXT_LINES = 50
 
@@ -59,9 +84,44 @@ def _line_starts(content: str) -> list[int]:
     return starts
 
 
+def _has_saved_bytes(value: object) -> bool:
+    """QSettings に窓位置などが実際に残っているか。"""
+    if value is None:
+        return False
+    if isinstance(value, QByteArray):
+        return not value.isEmpty()
+    if isinstance(value, (bytes, bytearray)):
+        return len(value) > 0
+    if isinstance(value, str):
+        return bool(value)
+    return True
+
+
 def open_with_default_app(path: str) -> bool:
     """OSで関連付けられたアプリでファイルを開く。"""
     return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+
+class DirectoryInput(QComboBox):
+    """最近使った検索先を候補に持つ、テスト互換の入力欄。"""
+
+    returnPressed = pyqtSignal()
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setEditText(text)
+        line_edit = self.lineEdit()
+        if line_edit is not None:
+            line_edit.returnPressed.connect(self.returnPressed.emit)
+
+    def text(self) -> str:
+        return self.currentText()
+
+    def setText(self, text: str) -> None:
+        self.setEditText(text)
 
 
 class ElidedLabel(QLabel):
@@ -156,11 +216,14 @@ class MainWindow(QMainWindow):
         initial_directory: Path,
         thread_factory: Callable[[FileSearcher, SearchQuery, Path], SearchThread] = SearchThread,
         open_path: Callable[[str], bool] = open_with_default_app,
+        settings: QSettings | None = None,
     ) -> None:
         super().__init__()
         self._searcher = searcher
         self._thread_factory = thread_factory
         self._open_path = open_path
+        self._settings = settings if settings is not None else QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
+        self._recent_folders: list[str] = []
         self._close_requested = False
         self._active_query: SearchQuery | None = None
         self._preview_full_content = ""
@@ -173,6 +236,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("ファイル検索")
         self.setGeometry(100, 100, 1100, 700)
+        self.setAcceptDrops(True)
 
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
@@ -181,7 +245,7 @@ class MainWindow(QMainWindow):
 
         directory_layout = QHBoxLayout()
         directory_layout.addWidget(QLabel("検索先:", self))
-        self.directory_input = QLineEdit(str(initial_directory), self)
+        self.directory_input = DirectoryInput(str(initial_directory), self)
         self.directory_input.returnPressed.connect(self.start_search)
         directory_layout.addWidget(self.directory_input)
         self.browse_button = QPushButton("参照...", self)
@@ -197,6 +261,9 @@ class MainWindow(QMainWindow):
         self.case_checkbox = QCheckBox("大文字と小文字を区別", self)
         self.case_checkbox.setChecked(True)
         input_layout.addWidget(self.case_checkbox)
+        self.regex_checkbox = QCheckBox("正規表現", self)
+        self.regex_checkbox.setChecked(False)
+        input_layout.addWidget(self.regex_checkbox)
         layout.addLayout(input_layout)
 
         button_layout = QHBoxLayout()
@@ -222,6 +289,14 @@ class MainWindow(QMainWindow):
         results_pane = QWidget(self)
         results_layout = QVBoxLayout(results_pane)
         results_layout.setContentsMargins(0, 0, 0, 0)
+        sort_row = QHBoxLayout()
+        sort_row.addWidget(QLabel("並び替え:", self))
+        self.sort_combo = QComboBox(self)
+        self.sort_combo.addItems(list(SORT_MODES))
+        self.sort_combo.setCurrentText(DEFAULT_SORT_MODE)
+        sort_row.addWidget(self.sort_combo)
+        sort_row.addStretch(1)
+        results_layout.addLayout(sort_row)
         results_layout.addWidget(self.result_list)
 
         preview_pane = QWidget(self)
@@ -280,16 +355,63 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
 
+        self._restore_session()
+        self.sort_combo.currentTextChanged.connect(self._on_sort_mode_changed)
+
     def choose_directory(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "検索先フォルダーを選択", self.directory_input.text())
         if selected:
-            self.directory_input.setText(selected)
+            self.apply_directory(selected)
+
+    def apply_directory(self, path: str | Path) -> None:
+        """検索先欄を更新し、存在するフォルダーなら最近使った一覧へ載せる。"""
+        candidate = Path(path).expanduser()
+        if candidate.is_file():
+            path = candidate.parent
+        self.directory_input.setText(str(path))
+        self._remember_recent(str(path))
+
+    def dropped_directory(self, urls: list[QUrl]) -> Path | None:
+        """ローカルのフォルダー1件、またはファイル1件の親フォルダーだけを受け取る。"""
+        if len(urls) != 1:
+            return None
+        url = urls[0]
+        if not url.isLocalFile():
+            return None
+        path = Path(url.toLocalFile())
+        if path.is_dir():
+            return path
+        if path.is_file():
+            return path.parent
+        return None
+
+    def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
+        if event is None:
+            return
+        if self.dropped_directory(list(event.mimeData().urls())) is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent | None) -> None:
+        if event is None:
+            return
+        directory = self.dropped_directory(list(event.mimeData().urls()))
+        if directory is None:
+            event.ignore()
+            return
+        self.apply_directory(directory)
+        event.acceptProposedAction()
 
     def start_search(self) -> None:
         if self.search_thread is not None:
             return
         try:
-            query = SearchQuery.parse(self.search_input.text(), case_sensitive=self.case_checkbox.isChecked())
+            query = SearchQuery.parse(
+                self.search_input.text(),
+                case_sensitive=self.case_checkbox.isChecked(),
+                regex=self.regex_checkbox.isChecked(),
+            )
         except QuerySyntaxError as error:
             self.status_bar.showMessage(str(error))
             return
@@ -299,6 +421,7 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"検索先フォルダーが見つかりません: {directory_text}")
             return
 
+        self._remember_recent(str(directory))
         self._set_searching(True)
         self._active_query = query
         self.result_list.clear()
@@ -332,19 +455,28 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"検索中: {processed_count} / {total_count} 件")
 
     def display_result(self, result: str, hit_count: int = 1, snippet: str = "") -> None:
+        self._insert_result(result, hit_count, snippet, select_if_empty=True)
+
+    def _insert_result(self, result: str, hit_count: int, snippet: str, *, select_if_empty: bool) -> None:
         path = Path(result)
+        relative = self._relative_display_path(path)
         item = QListWidgetItem()
         item.setData(PATH_ROLE, result)
+        item.setData(HIT_COUNT_ROLE, hit_count)
+        item.setData(RELATIVE_PATH_ROLE, relative)
+        item.setData(NAME_ROLE, path.name)
+        item.setData(SNIPPET_ROLE, snippet)
         widget = ResultItemWidget(
             f"{path.name}  ({hit_count}件)",
-            self._relative_display_path(path),
+            relative,
             snippet,
             self.result_list,
         )
-        self.result_list.addItem(item)
+        row = self._sorted_insert_row(item)
+        self.result_list.insertItem(row, item)
         self.result_list.setItemWidget(item, widget)
         item.setSizeHint(widget.sizeHint())
-        if self.result_list.currentItem() is None:
+        if select_if_empty and self.result_list.currentItem() is None:
             self.result_list.setCurrentRow(0)
 
     def _relative_display_path(self, path: Path) -> str:
@@ -410,7 +542,11 @@ class MainWindow(QMainWindow):
         if self._active_query is not None:
             return self._active_query
         try:
-            return SearchQuery.parse(self.search_input.text(), case_sensitive=self.case_checkbox.isChecked())
+            return SearchQuery.parse(
+                self.search_input.text(),
+                case_sensitive=self.case_checkbox.isChecked(),
+                regex=self.regex_checkbox.isChecked(),
+            )
         except QuerySyntaxError:
             return None
 
@@ -554,6 +690,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         # 実行中のスレッドを残したまま破棄すると異常終了するため、停止を待ってから閉じる
         if self.search_thread is None:
+            self._save_settings()
             event.accept()
             return
         self._close_requested = True
@@ -565,3 +702,93 @@ class MainWindow(QMainWindow):
         self.browse_button.setEnabled(not searching)
         self.directory_input.setEnabled(not searching)
         self.cancel_button.setEnabled(searching)
+
+    def _remember_recent(self, directory: str) -> None:
+        self._recent_folders = push_recent_folder(self._recent_folders, directory)
+        self._sync_recent_combo()
+
+    def _sync_recent_combo(self) -> None:
+        current = self.directory_input.text()
+        self.directory_input.blockSignals(True)
+        self.directory_input.clear()
+        self.directory_input.addItems(self._recent_folders)
+        self.directory_input.setText(current)
+        self.directory_input.blockSignals(False)
+
+    def _result_sort_key(self, item: QListWidgetItem) -> tuple:
+        name = str(item.data(NAME_ROLE) or "").casefold()
+        relative = str(item.data(RELATIVE_PATH_ROLE) or "").casefold()
+        hit_count = int(item.data(HIT_COUNT_ROLE) or 0)
+        mode = self.sort_combo.currentText()
+        if mode == SORT_BY_HITS:
+            return (-hit_count, name)
+        if mode == SORT_BY_PATH:
+            return (relative,)
+        return (name,)
+
+    def _sorted_insert_row(self, item: QListWidgetItem) -> int:
+        key = self._result_sort_key(item)
+        for row in range(self.result_list.count()):
+            existing = self.result_list.item(row)
+            if existing is not None and self._result_sort_key(existing) > key:
+                return row
+        return self.result_list.count()
+
+    def _on_sort_mode_changed(self, _mode: str) -> None:
+        self._apply_sort()
+
+    def _apply_sort(self) -> None:
+        if self.result_list.count() <= 1:
+            return
+        current = self.result_list.currentItem()
+        current_path = self._item_path(current) if current is not None else None
+        selected_paths = {self._item_path(item) for item in self.result_list.selectedItems()}
+        payloads = [
+            (
+                self.result_list.item(row).data(PATH_ROLE),
+                int(self.result_list.item(row).data(HIT_COUNT_ROLE) or 0),
+                self.result_list.item(row).data(SNIPPET_ROLE) or "",
+            )
+            for row in range(self.result_list.count())
+        ]
+        self.result_list.blockSignals(True)
+        self.result_list.clear()
+        for path, hit_count, snippet in payloads:
+            self._insert_result(path, int(hit_count), str(snippet), select_if_empty=False)
+        for row in range(self.result_list.count()):
+            item = self.result_list.item(row)
+            if item is None:
+                continue
+            path = self._item_path(item)
+            item.setSelected(path in selected_paths)
+            if path == current_path:
+                self.result_list.setCurrentItem(item)
+        self.result_list.blockSignals(False)
+
+    def _restore_session(self) -> None:
+        if self._settings.contains(KEY_CASE_SENSITIVE):
+            self.case_checkbox.setChecked(as_bool(self._settings.value(KEY_CASE_SENSITIVE), True))
+        if self._settings.contains(KEY_REGEX):
+            self.regex_checkbox.setChecked(as_bool(self._settings.value(KEY_REGEX), False))
+        saved_sort = self._settings.value(KEY_SORT_MODE)
+        if saved_sort in SORT_MODES:
+            self.sort_combo.setCurrentText(str(saved_sort))
+        self._recent_folders = existing_recent_folders(self._settings.value(KEY_RECENT_FOLDERS))
+        self._sync_recent_combo()
+        geometry = self._settings.value(KEY_GEOMETRY)
+        if _has_saved_bytes(geometry) and not self.restoreGeometry(geometry):
+            self.setGeometry(100, 100, 1100, 700)
+        splitter = self._settings.value(KEY_SPLITTER)
+        if _has_saved_bytes(splitter):
+            self.results_splitter.restoreState(splitter)
+
+    def _save_settings(self) -> None:
+        self._remember_recent(self.directory_input.text())
+        self._settings.setValue(KEY_GEOMETRY, self.saveGeometry())
+        self._settings.setValue(KEY_SPLITTER, self.results_splitter.saveState())
+        self._settings.setValue(KEY_DIRECTORY, self.directory_input.text())
+        self._settings.setValue(KEY_RECENT_FOLDERS, self._recent_folders)
+        self._settings.setValue(KEY_CASE_SENSITIVE, self.case_checkbox.isChecked())
+        self._settings.setValue(KEY_REGEX, self.regex_checkbox.isChecked())
+        self._settings.setValue(KEY_SORT_MODE, self.sort_combo.currentText())
+        self._settings.sync()
