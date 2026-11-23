@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 import chardet
 import docx
+import pypdf
 
 # 文字コード判定に渡す先頭バイト数。巨大なファイルでも判定時間を一定に抑える。
 DETECTION_SAMPLE_BYTES = 256 * 1024
@@ -32,6 +33,19 @@ BOM_ENCODINGS = (
 # このエスケープシーケンスがあれば、UTF-8より先に試す。
 ISO2022_JP_KANJI_ESCAPE = b"\x1b$"
 WORD_LOCK_FILE_PREFIX = "~$"
+_WML_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_TXBX_CONTENT_TAG = f"{{{_WML_NS}}}txbxContent"
+_PARAGRAPH_TAG = f"{{{_WML_NS}}}p"
+_TEXT_TAG = f"{{{_WML_NS}}}t"
+_VML_TEXTBOX_TAG = "{urn:schemas-microsoft-com:vml}textbox"
+_HEADER_FOOTER_ATTRS = (
+    "header",
+    "footer",
+    "first_page_header",
+    "first_page_footer",
+    "even_page_header",
+    "even_page_footer",
+)
 
 
 class UnreadableFileError(Exception):
@@ -87,7 +101,7 @@ class TextFileReader:
 
 
 class DocxFileReader:
-    """Word文書(.docx)の本文と表のテキストを読む。"""
+    """Word文書(.docx)の本文・表・ヘッダー・フッター・テキストボックスのテキストを読む。"""
 
     def __init__(self, open_document: Callable[[str], Any] = docx.Document) -> None:
         self._open_document = open_document
@@ -97,12 +111,19 @@ class DocxFileReader:
             raise UnreadableFileError("Wordが編集中に作成する一時ファイルです")
         try:
             document = self._open_document(str(path))
-            return "\n".join(self._iter_texts(document))
+            return "\n".join(self._iter_document_texts(document))
         except OSError:
             raise
         except Exception as error:
             # python-docx は壊れた文書に対して zipfile / lxml などの多様な例外をそのまま返す
             raise UnreadableFileError(f"Word文書として開けません ({type(error).__name__})") from error
+
+    def _iter_document_texts(self, document: Any) -> Iterator[str]:
+        yield from self._iter_texts(document)
+        for text in self._iter_header_footer_texts(document):
+            if text.strip():
+                yield text
+        yield from self._iter_textbox_texts(document)
 
     def _iter_texts(self, container: Any) -> Iterator[str]:
         """段落と表を出現順にたどる。表のセルは入れ子の表も含めて再帰する。"""
@@ -114,7 +135,160 @@ class DocxFileReader:
             else:
                 yield block.text
 
+    def _iter_header_footer_texts(self, document: Any) -> Iterator[str]:
+        for header_footer in self._iter_header_footer_containers(document):
+            yield from self._iter_texts(header_footer)
+
+    def _iter_header_footer_containers(self, document: Any) -> Iterator[Any]:
+        for section in self._iter_sections(document):
+            for attr in _HEADER_FOOTER_ATTRS:
+                header_footer = getattr(section, attr, None)
+                if header_footer is None:
+                    continue
+                if getattr(header_footer, "is_linked_to_previous", False):
+                    continue
+                yield header_footer
+
+    def _iter_sections(self, document: Any) -> Iterator[Any]:
+        sections = getattr(document, "sections", None)
+        if sections is None:
+            return
+        try:
+            yield from sections
+        except TypeError:
+            return
+
+    def _iter_textbox_texts(self, document: Any) -> Iterator[str]:
+        for root in self._iter_xml_roots(document):
+            yield from self._iter_txbx_content_texts(root)
+            yield from self._iter_vml_textbox_texts(root)
+
+    def _iter_xml_roots(self, document: Any) -> Iterator[Any]:
+        seen: set[int] = set()
+        for candidate in (getattr(document, "element", None),):
+            yield from self._yield_xml_root(candidate, seen)
+        for header_footer in self._iter_header_footer_containers(document):
+            element = getattr(header_footer, "element", None)
+            if element is None:
+                element = getattr(header_footer, "_element", None)
+            yield from self._yield_xml_root(element, seen)
+
+    def _yield_xml_root(self, element: Any, seen: set[int]) -> Iterator[Any]:
+        if not isinstance(getattr(element, "tag", None), str):
+            return
+        identity = id(element)
+        if identity in seen:
+            return
+        seen.add(identity)
+        yield element
+
+    def _iter_txbx_content_texts(self, root: Any) -> Iterator[str]:
+        for box in self._iter_tagged(root, _TXBX_CONTENT_TAG):
+            for paragraph in self._iter_paragraphs_skipping_nested_txbx(box):
+                text = self._xml_text_nodes(paragraph)
+                if text.strip():
+                    yield text
+
+    def _iter_vml_textbox_texts(self, root: Any) -> Iterator[str]:
+        for box in self._iter_tagged(root, _VML_TEXTBOX_TAG):
+            if any(self._iter_tagged(box, _TXBX_CONTENT_TAG)):
+                continue
+            text = self._xml_text_nodes(box)
+            if text.strip():
+                yield text
+
+    def _iter_paragraphs_skipping_nested_txbx(self, node: Any) -> Iterator[Any]:
+        for child in self._xml_children(node):
+            tag = getattr(child, "tag", None)
+            if tag == _TXBX_CONTENT_TAG:
+                continue
+            if tag == _PARAGRAPH_TAG:
+                yield child
+            else:
+                yield from self._iter_paragraphs_skipping_nested_txbx(child)
+
+    def _xml_text_nodes(self, node: Any) -> str:
+        parts: list[str] = []
+        for child in self._iter_tagged(node, _TEXT_TAG):
+            text = getattr(child, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
+
+    def _iter_tagged(self, node: Any, tag: str) -> Iterator[Any]:
+        if not isinstance(getattr(node, "tag", None), str):
+            return
+        iter_elements = getattr(node, "iter", None)
+        if not callable(iter_elements):
+            return
+        try:
+            found = iter_elements(tag)
+        except TypeError:
+            return
+        for element in found:
+            if isinstance(getattr(element, "tag", None), str):
+                yield element
+            else:
+                return
+
+    def _xml_children(self, node: Any) -> Iterator[Any]:
+        try:
+            children = list(node)
+        except TypeError:
+            return
+        for child in children:
+            if isinstance(getattr(child, "tag", None), str):
+                yield child
+
+
+class PdfFileReader:
+    """PDFからテキストを取り出す。抽出できないファイルは除外対象にする。"""
+
+    def __init__(self, open_document: Callable[[str], Any] = pypdf.PdfReader) -> None:
+        self._open_document = open_document
+
+    def read(self, path: Path) -> str:
+        try:
+            reader = self._open_document(str(path))
+            if getattr(reader, "is_encrypted", False) is True:
+                raise UnreadableFileError("PDFからテキストを取り出せません (暗号化されています)")
+            texts = [self._page_text(page) for page in self._pages(reader)]
+            joined = "\n".join(texts)
+            if not joined.strip():
+                raise UnreadableFileError("PDFからテキストを取り出せません (テキストを抽出できません)")
+            return joined
+        except UnreadableFileError:
+            raise
+        except OSError:
+            raise
+        except Exception as error:
+            raise UnreadableFileError(f"PDFからテキストを取り出せません ({type(error).__name__})") from error
+
+    def _pages(self, reader: Any) -> Iterator[Any]:
+        pages = getattr(reader, "pages", None)
+        if pages is None:
+            return
+        try:
+            yield from pages
+        except TypeError:
+            return
+
+    def _page_text(self, page: Any) -> str:
+        extract = getattr(page, "extract_text", None)
+        if not callable(extract):
+            return ""
+        text = extract()
+        return text if isinstance(text, str) else ""
+
 
 def default_readers() -> dict[str, FileReader]:
     """拡張子(小文字)ごとの既定の読み取り手段を返す。"""
-    return {".docx": DocxFileReader(), ".txt": TextFileReader()}
+    text_reader = TextFileReader()
+    return {
+        ".docx": DocxFileReader(),
+        ".txt": text_reader,
+        ".md": text_reader,
+        ".markdown": text_reader,
+        ".csv": text_reader,
+        ".pdf": PdfFileReader(),
+    }

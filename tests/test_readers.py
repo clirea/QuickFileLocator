@@ -3,6 +3,7 @@ import contextlib
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock
+from xml.etree.ElementTree import Element, SubElement
 
 import docx
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from quickfilelocator.readers import (
     DETECTION_SAMPLE_BYTES,
     DocxFileReader,
+    PdfFileReader,
     TextFileReader,
     UnreadableFileError,
     default_readers,
@@ -192,4 +194,165 @@ def test異常系_readメソッドがWord文書の読み取り権限エラーを
 
 
 def test正常系_default_readersメソッドが対応する拡張子を返すこと():
-    assert set(default_readers()) == {".docx", ".txt"}
+    assert set(default_readers()) == {".docx", ".txt", ".md", ".markdown", ".csv", ".pdf"}
+
+
+_WML_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _wml(tag: str) -> str:
+    return f"{{{_WML_NS}}}{tag}"
+
+
+def _text_block(text: str) -> MagicMock:
+    block = MagicMock(spec=["text"])
+    block.text = text
+    return block
+
+
+def _header_footer(*texts: str, linked: bool = False) -> MagicMock:
+    container = MagicMock(spec=["iter_inner_content", "is_linked_to_previous", "element"])
+    container.iter_inner_content.return_value = [_text_block(text) for text in texts]
+    container.is_linked_to_previous = linked
+    container.element = None
+    return container
+
+
+def _section(*, header: MagicMock | None = None, footer: MagicMock | None = None) -> MagicMock:
+    section = MagicMock(spec=["header", "footer"])
+    section.header = header if header is not None else _header_footer(linked=True)
+    section.footer = footer if footer is not None else _header_footer(linked=True)
+    return section
+
+
+def _docx_document(
+    *, body: list[str], sections: list[MagicMock] | None = None, element: Element | None = None
+) -> MagicMock:
+    document = MagicMock(spec=["iter_inner_content", "sections", "element"])
+    document.iter_inner_content.return_value = [_text_block(text) for text in body]
+    document.sections = [] if sections is None else sections
+    document.element = element
+    return document
+
+
+def _read_docx(document: MagicMock) -> str:
+    return DocxFileReader(open_document=lambda _path: document).read(Path("sample.docx"))
+
+
+def test正常系_readメソッドがWord文書のヘッダーのテキストを含むこと():
+    document = _docx_document(body=["本文"], sections=[_section(header=_header_footer("ヘッダー見出し"))])
+
+    assert "ヘッダー見出し" in _read_docx(document)
+
+
+def test正常系_readメソッドがWord文書のフッターのテキストを含むこと():
+    document = _docx_document(body=["本文"], sections=[_section(footer=_header_footer("フッター見出し"))])
+
+    assert "フッター見出し" in _read_docx(document)
+
+
+def test正常系_readメソッドが前節とリンクしたヘッダーを重複して含めないこと():
+    document = _docx_document(
+        body=["本文"],
+        sections=[
+            _section(header=_header_footer("固有ヘッダー")),
+            _section(header=_header_footer("重複ヘッダー", linked=True)),
+        ],
+    )
+
+    assert "重複ヘッダー" not in _read_docx(document)
+
+
+def test正常系_readメソッドがsectionsのない文書モックでも本文を返すこと():
+    document = MagicMock(spec=["iter_inner_content"])
+    document.iter_inner_content.return_value = [_text_block("本文だけ")]
+
+    assert DocxFileReader(open_document=lambda _path: document).read(Path("body.docx")) == "本文だけ"
+
+
+def test正常系_readメソッドがWord文書のテキストボックスのテキストを含むこと():
+    root = Element(_wml("document"))
+    paragraph = SubElement(SubElement(root, _wml("txbxContent")), _wml("p"))
+    SubElement(SubElement(paragraph, _wml("r")), _wml("t")).text = "枠内の文字"
+    document = _docx_document(body=["本文"], element=root)
+
+    assert "枠内の文字" in _read_docx(document)
+
+
+@pytest.mark.parametrize("expected", ["実ヘッダー", "実フッター"])
+def test正常系_readメソッドが実際のWord文書のヘッダーとフッターを読むこと(tmp_path, expected):
+    document = docx.Document()
+    document.add_paragraph("本文段落")
+    document.sections[0].header.paragraphs[0].text = "実ヘッダー"
+    document.sections[0].footer.paragraphs[0].text = "実フッター"
+    path = tmp_path / "headed.docx"
+    document.save(str(path))
+
+    assert expected in DocxFileReader().read(path)
+
+
+@pytest.mark.parametrize("suffix", [".md", ".markdown", ".csv"])
+def test正常系_default_readersメソッドがMarkdownとCSVをTextFileReaderに割り当てること(suffix):
+    assert isinstance(default_readers()[suffix], TextFileReader)
+
+
+def test正常系_default_readersメソッドがPDFをPdfFileReaderに割り当てること():
+    assert isinstance(default_readers()[".pdf"], PdfFileReader)
+
+
+@pytest.mark.parametrize("name", ["note.md", "note.markdown", "data.csv"])
+def test正常系_readメソッドがMarkdownとCSVをテキストとして読むこと(tmp_path, name):
+    path = tmp_path / name
+    path.write_text("検索対象", encoding="utf-8")
+
+    assert default_readers()[path.suffix.lower()].read(path) == "検索対象"
+
+
+def _pdf_reader(*, pages: list[str], encrypted: bool = False) -> MagicMock:
+    reader = MagicMock()
+    reader.is_encrypted = encrypted
+    page_mocks = []
+    for page_text in pages:
+        page = MagicMock()
+        page.extract_text.return_value = page_text
+        page_mocks.append(page)
+    reader.pages = page_mocks
+    return reader
+
+
+def test正常系_readメソッドがPDFの各ページのテキストを返すこと():
+    reader = _pdf_reader(pages=["1ページ目", "2ページ目"])
+
+    assert PdfFileReader(open_document=lambda _path: reader).read(Path("a.pdf")) == "1ページ目\n2ページ目"
+
+
+def test異常系_readメソッドがテキストを抽出できないPDFでUnreadableFileErrorを送出すること():
+    reader = _pdf_reader(pages=["  \n", ""])
+
+    with pytest.raises(UnreadableFileError, match="テキストを抽出できません"):
+        PdfFileReader(open_document=lambda _path: reader).read(Path("scan.pdf"))
+
+
+def test異常系_readメソッドがPDFを開けないときUnreadableFileErrorを送出すること():
+    opener = MagicMock(side_effect=ValueError("broken"))
+
+    with pytest.raises(UnreadableFileError, match="PDFからテキストを取り出せません"):
+        PdfFileReader(open_document=opener).read(Path("bad.pdf"))
+
+
+def test異常系_readメソッドが暗号化されたPDFでUnreadableFileErrorを送出すること():
+    reader = _pdf_reader(pages=["secret"], encrypted=True)
+
+    with pytest.raises(UnreadableFileError, match="暗号化"):
+        PdfFileReader(open_document=lambda _path: reader).read(Path("locked.pdf"))
+
+
+def test異常系_readメソッドがPDFのテキスト抽出例外でUnreadableFileErrorを送出すること():
+    page = MagicMock()
+    page.extract_text.side_effect = RuntimeError("fail")
+    reader = MagicMock()
+    reader.is_encrypted = False
+    reader.pages = [page]
+
+    with pytest.raises(UnreadableFileError, match="PDFからテキストを取り出せません"):
+        PdfFileReader(open_document=lambda _path: reader).read(Path("a.pdf"))
