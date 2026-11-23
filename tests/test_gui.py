@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PyQt6.QtCore import QSettings, QUrl
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import QApplication
 
@@ -11,6 +12,7 @@ from quickfilelocator.gui import PATH_ROLE, MainWindow, SearchThread
 from quickfilelocator.query import SearchQuery
 from quickfilelocator.readers import UnreadableFileError, default_readers
 from quickfilelocator.search import ExcludedFile, FileSearcher, SearchDirectoryError, SearchSummary
+from quickfilelocator.settings import KEY_DIRECTORY, SORT_BY_HITS
 
 QUERY = SearchQuery.parse("needle")
 
@@ -146,8 +148,15 @@ def open_path():
 
 
 @pytest.fixture
-def window(qapp, searcher, thread_factory, open_path, tmp_path):
-    main_window = MainWindow(searcher, tmp_path, thread_factory=thread_factory, open_path=open_path)
+def qsettings(tmp_path):
+    settings = QSettings(str(tmp_path / "qsettings.ini"), QSettings.Format.IniFormat)
+    yield settings
+    settings.sync()
+
+
+@pytest.fixture
+def window(qapp, searcher, thread_factory, open_path, tmp_path, qsettings):
+    main_window = MainWindow(searcher, tmp_path, thread_factory=thread_factory, open_path=open_path, settings=qsettings)
     main_window.search_input.setText("needle")
     yield main_window
     main_window.search_thread = None
@@ -808,11 +817,11 @@ def wait_until_idle(window, timeout_ms=5000):
 
 
 @pytest.fixture
-def real_window(qapp, tmp_path):
+def real_window(qapp, tmp_path, qsettings):
     """実際の読み取り・走査・スレッドをつないだ画面。"""
     (tmp_path / "hit.txt").write_text("needle", encoding="utf-8")
     (tmp_path / "broken.docx").write_bytes(b"not a docx")
-    main_window = MainWindow(FileSearcher(default_readers()), tmp_path)
+    main_window = MainWindow(FileSearcher(default_readers()), tmp_path, settings=qsettings)
     main_window.search_input.setText("needle")
     yield main_window
     wait_until_idle(main_window)
@@ -849,13 +858,13 @@ def test正常系_start_searchメソッドが壊れたファイルを除外一�
     assert real_window.excluded_area.toPlainText().startswith(str(tmp_path / "broken.docx"))
 
 
-def test正常系_closeEventメソッドが実スレッドの検索中に閉じても停止を待って終了すること(qapp, tmp_path):
+def test正常系_closeEventメソッドが実スレッドの検索中に閉じても停止を待って終了すること(qapp, tmp_path, qsettings):
     (tmp_path / "a.txt").write_text("needle", encoding="utf-8")
     reading = threading.Event()
     release = threading.Event()
     reader = MagicMock()
     reader.read.side_effect = lambda path: (reading.set(), release.wait(5), "needle")[2]
-    main_window = MainWindow(FileSearcher({".txt": reader}), tmp_path)
+    main_window = MainWindow(FileSearcher({".txt": reader}), tmp_path, settings=qsettings)
     main_window.search_input.setText("needle")
     main_window.show()
     main_window.start_search()
@@ -867,3 +876,93 @@ def test正常系_closeEventメソッドが実スレッドの検索中に閉じ�
     wait_until_idle(main_window)
 
     assert (still_open_while_running, main_window.isVisible()) == (True, False)
+
+
+def test正常系_initメソッドが正規表現をオフで開始すること(window):
+    assert window.regex_checkbox.isChecked() is False
+
+
+def test正常系_initメソッドが空の設定でもウィンドウを構築すること(window):
+    assert window.windowTitle() == "ファイル検索"
+
+
+def test正常系_start_searchメソッドが正規表現の設定を検索条件に反映すること(window, thread_factory):
+    window.regex_checkbox.setChecked(True)
+
+    window.start_search()
+
+    assert thread_factory.call_args.args[1].regex is True
+
+
+def test異常系_start_searchメソッドが不正な正規表現の理由を表示すること(window):
+    window.regex_checkbox.setChecked(True)
+    window.search_input.setText("[")
+
+    window.start_search()
+
+    assert window.status_bar.currentMessage().startswith("正規表現が不正です")
+
+
+def test正常系_closeEventメソッドが検索先を設定へ保存すること(window, tmp_path, qsettings):
+    window.closeEvent(QCloseEvent())
+
+    assert qsettings.value(KEY_DIRECTORY) == str(tmp_path)
+
+
+def test正常系_choose_directoryメソッドが最近使ったフォルダーへ追加すること(window, tmp_path):
+    picked = tmp_path / "picked"
+    picked.mkdir()
+    with patch.object(gui.QFileDialog, "getExistingDirectory", return_value=str(picked)):
+        window.choose_directory()
+
+    assert window.directory_input.itemText(0) == str(picked)
+
+
+def test正常系_apply_directoryメソッドがフォルダーを入力欄に入れること(window, tmp_path):
+    dropped = tmp_path / "dropped"
+    dropped.mkdir()
+
+    window.apply_directory(dropped)
+
+    assert window.directory_input.text() == str(dropped)
+
+
+def test正常系_dropped_directoryメソッドがフォルダーのURLからそのパスを返すこと(window, tmp_path):
+    dropped = tmp_path / "dropped"
+    dropped.mkdir()
+
+    assert window.dropped_directory([QUrl.fromLocalFile(str(dropped))]) == dropped
+
+
+def test正常系_display_resultメソッドがヒット件数順で件数の多い結果を先に並べること(window):
+    window.sort_combo.setCurrentText(SORT_BY_HITS)
+    window.display_result("/data/a.txt", 1)
+    window.display_result("/data/b.txt", 5)
+    window.display_result("/data/c.txt", 3)
+
+    assert [window.result_list.item(i).data(PATH_ROLE) for i in range(3)] == [
+        "/data/b.txt",
+        "/data/c.txt",
+        "/data/a.txt",
+    ]
+
+
+def test正常系_display_resultメソッドが名前順で後から来た名前を正しい位置に入れること(window):
+    window.display_result("/data/c.txt", 1)
+    window.display_result("/data/a.txt", 1)
+    window.display_result("/data/b.txt", 1)
+
+    assert [window.result_list.item(i).data(PATH_ROLE) for i in range(3)] == [
+        "/data/a.txt",
+        "/data/b.txt",
+        "/data/c.txt",
+    ]
+
+
+def test正常系_sort_comboがヒット件数へ変えたとき件数の多い結果を先頭に置くこと(window):
+    window.display_result("/data/low.txt", 1)
+    window.display_result("/data/high.txt", 9)
+
+    window.sort_combo.setCurrentText(SORT_BY_HITS)
+
+    assert window.result_list.item(0).data(PATH_ROLE) == "/data/high.txt"
